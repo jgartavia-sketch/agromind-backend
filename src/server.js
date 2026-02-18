@@ -9,6 +9,7 @@ import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 import authRouter from "./routes/auth.js";
+import farmsRouter from "./routes/farms.js";
 
 dotenv.config();
 
@@ -37,6 +38,9 @@ app.get("/", (req, res) => {
 
 // AUTH
 app.use("/auth", authRouter(prisma));
+
+// API (Mapa / Fincas)
+app.use("/api", farmsRouter(prisma));
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`✅ http://localhost:${PORT}`));
