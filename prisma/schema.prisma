@@ -14,7 +14,7 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  farms     Farm[]
+  farms Farm[]
 }
 
 model Farm {
@@ -26,11 +26,12 @@ model Farm {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  user    User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  points  MapPoint[]
-  lines   MapLine[]
-  zones   MapZone[]
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  points MapPoint[]
+  lines  MapLine[]
+  zones  MapZone[]
 
+  @@unique([userId, name])
   @@index([userId])
 }
 
@@ -45,6 +46,7 @@ model MapPoint {
   farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
 
   @@index([farmId])
+  @@index([farmId, updatedAt])
 }
 
 model MapLine {
@@ -58,6 +60,7 @@ model MapLine {
   farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
 
   @@index([farmId])
+  @@index([farmId, updatedAt])
 }
 
 model MapZone {
@@ -72,4 +75,5 @@ model MapZone {
   farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
 
   @@index([farmId])
+  @@index([farmId, updatedAt])
 }
