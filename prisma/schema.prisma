@@ -4,6 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -23,6 +24,10 @@ model Farm {
   name            String
   view            Json?
   preferredCenter Json?
+
+  // ✅ Para gobernar “finca principal” (la regla se hace en backend)
+  isPrimary       Boolean  @default(false)
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -30,10 +35,11 @@ model Farm {
   points MapPoint[]
   lines  MapLine[]
   zones  MapZone[]
-  tasks  Task[]     // ✅ NUEVO
+  tasks  Task[]
 
   @@unique([userId, name])
   @@index([userId])
+  @@index([userId, isPrimary])
 }
 
 model MapPoint {
