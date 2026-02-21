@@ -17,6 +17,13 @@ export default function authRouter(prisma) {
           .json({ error: "Email y password son obligatorios." });
       }
 
+      const secret = process.env.JWT_SECRET;
+      if (!secret) {
+        return res
+          .status(500)
+          .json({ error: "Falta JWT_SECRET en el servidor." });
+      }
+
       const cleanEmail = String(email).trim().toLowerCase();
 
       if (String(password).length < 8) {
@@ -36,16 +43,38 @@ export default function authRouter(prisma) {
 
       const hash = await bcrypt.hash(String(password), 10);
 
-      const user = await prisma.user.create({
-        data: {
-          email: cleanEmail,
-          name: name ? String(name).trim() : null,
-          password: hash,
-        },
-        select: { id: true, email: true, name: true, createdAt: true },
+      // ✅ User + Farm en una sola transacción (atomicidad)
+      const { user, farm } = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: {
+            email: cleanEmail,
+            name: name ? String(name).trim() : null,
+            password: hash,
+          },
+          select: { id: true, email: true, name: true, createdAt: true },
+        });
+
+        // ✅ Crear finca real para ese usuario (NO demo)
+        const farm = await tx.farm.create({
+          data: {
+            name: "Mi finca",
+            userId: user.id, // 👈 si tu schema usa otro nombre (ownerId), lo cambiamos
+            view: null,
+            preferredCenter: null, // si tu modelo no tiene esto, bórralo
+          },
+          select: { id: true, name: true, createdAt: true, updatedAt: true },
+        });
+
+        return { user, farm };
       });
 
-      return res.status(201).json({ user });
+      const token = jwt.sign(
+        { sub: user.id, email: user.email, name: user.name || "" },
+        secret,
+        { expiresIn: "7d" }
+      );
+
+      return res.status(201).json({ token, user, farm });
     } catch (err) {
       console.error("REGISTER_ERROR:", err);
       return res.status(500).json({ error: "Error interno en registro." });
