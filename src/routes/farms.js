@@ -21,11 +21,26 @@ function requireAuth(req, res, next) {
   }
 }
 
+// helpers chicos
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function cleanName(v, fallback) {
+  const s = isNonEmptyString(v) ? v.trim() : "";
+  return s.length ? s.slice(0, 80) : fallback; // evita nombres kilométricos
+}
+
+function looksLikeId(v) {
+  // cuid suele ser largo, pero esto evita ids vacíos/raros sin sobrecomplicar
+  return isNonEmptyString(v) && v.trim().length >= 8;
+}
+
 export default function farmsRouter(prisma) {
   const router = express.Router();
 
   // =========================
-  // GET /api/farms  ✅ (esto faltaba)
+  // GET /api/farms
   // =========================
   router.get("/farms", requireAuth, async (req, res) => {
     try {
@@ -59,11 +74,20 @@ export default function farmsRouter(prisma) {
       const userId = req.user.id;
       const { name, view } = req.body || {};
 
+      const finalName = cleanName(name, "Finca Demo 1");
+
+      const finalView =
+        view ?? { zoom: 14, center: [-84.43, 10.32] };
+
+      const preferredCenter =
+        finalView && Array.isArray(finalView.center) ? finalView.center : null;
+
       const farm = await prisma.farm.create({
         data: {
           userId,
-          name: name ? String(name).trim() : "Finca Demo 1",
-          view: view ?? { zoom: 14, center: [-84.43, 10.32] },
+          name: finalName,
+          view: finalView,
+          preferredCenter,
         },
         select: {
           id: true,
@@ -77,6 +101,10 @@ export default function farmsRouter(prisma) {
 
       return res.status(201).json({ farm });
     } catch (err) {
+      // Si pega el unique (userId,name) lo devolvemos bonito
+      if (err?.code === "P2002") {
+        return res.status(409).json({ error: "Ya existe una finca con ese nombre." });
+      }
       console.error("CREATE_FARM_ERROR:", err);
       return res.status(500).json({ error: "Error interno creando finca." });
     }
@@ -84,11 +112,10 @@ export default function farmsRouter(prisma) {
 
   // helper: verificar que la finca sea del user
   async function assertFarmOwner(farmId, userId) {
-    const farm = await prisma.farm.findFirst({
+    return prisma.farm.findFirst({
       where: { id: farmId, userId },
       select: { id: true, name: true, view: true, preferredCenter: true },
     });
-    return farm;
   }
 
   // =========================
@@ -99,8 +126,11 @@ export default function farmsRouter(prisma) {
       const farmId = req.params.id;
       const userId = req.user.id;
 
+      if (!looksLikeId(farmId)) return res.status(400).json({ error: "farmId inválido." });
+
       const farm = await assertFarmOwner(farmId, userId);
-      if (!farm) return res.status(404).json({ error: "Finca no existe." });
+      // 403 para no revelar si existe o no cuando no es del usuario
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const [points, lines, zones] = await Promise.all([
         prisma.mapPoint.findMany({
@@ -143,8 +173,10 @@ export default function farmsRouter(prisma) {
       const farmId = req.params.id;
       const userId = req.user.id;
 
+      if (!looksLikeId(farmId)) return res.status(400).json({ error: "farmId inválido." });
+
       const farm = await assertFarmOwner(farmId, userId);
-      if (!farm) return res.status(404).json({ error: "Finca no existe." });
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const { view, points, lines, zones } = req.body || {};
 
@@ -153,12 +185,17 @@ export default function farmsRouter(prisma) {
       const safeZones = Array.isArray(zones) ? zones : [];
 
       // Transacción: borramos y reinsertamos (simple y confiable para demo/propuesta)
-      // Luego optimizamos a upsert incremental.
       const result = await prisma.$transaction(async (tx) => {
         if (view) {
+          const preferredCenter =
+            view && Array.isArray(view.center) ? view.center : null;
+
           await tx.farm.update({
             where: { id: farmId },
-            data: { view },
+            data: {
+              view,
+              ...(preferredCenter ? { preferredCenter } : {}),
+            },
           });
         }
 
@@ -170,8 +207,8 @@ export default function farmsRouter(prisma) {
           await tx.mapPoint.createMany({
             data: safePoints.map((p) => ({
               farmId,
-              name: String(p.name || "").trim() || "Punto",
-              data: p.data ?? p,
+              name: cleanName(p?.name, "Punto"),
+              data: p?.data ?? p,
             })),
           });
         }
@@ -180,21 +217,20 @@ export default function farmsRouter(prisma) {
           await tx.mapLine.createMany({
             data: safeLines.map((l) => ({
               farmId,
-              name: String(l.name || "").trim() || "Línea",
-              data: l.data ?? l,
+              name: cleanName(l?.name, "Línea"),
+              data: l?.data ?? l,
             })),
           });
         }
 
         if (safeZones.length > 0) {
-          // createMany NO soporta JSON arrays complejo igual en todos los casos; lo hacemos uno por uno.
           for (const z of safeZones) {
             await tx.mapZone.create({
               data: {
                 farmId,
-                name: String(z.name || "").trim() || "Zona",
-                data: z.data ?? z,
-                components: z.components ?? {},
+                name: cleanName(z?.name, "Zona"),
+                data: z?.data ?? z,
+                components: z?.components ?? {},
               },
             });
           }
