@@ -30,6 +30,7 @@ model Farm {
   points MapPoint[]
   lines  MapLine[]
   zones  MapZone[]
+  tasks  Task[]     // ✅ NUEVO
 
   @@unique([userId, name])
   @@index([userId])
@@ -76,4 +77,23 @@ model MapZone {
 
   @@index([farmId])
   @@index([farmId, updatedAt])
+}
+
+model Task {
+  id        String   @id @default(cuid())
+  farmId    String
+  title     String
+  zone      String?
+  type      String
+  priority  String
+  due       DateTime
+  status    String
+  owner     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+
+  @@index([farmId])
+  @@index([farmId, due])
 }

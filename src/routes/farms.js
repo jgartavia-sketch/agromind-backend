@@ -9,7 +9,10 @@ function requireAuth(req, res, next) {
     if (!token) return res.status(401).json({ error: "Sin token." });
 
     const secret = process.env.JWT_SECRET;
-    if (!secret) return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
+    if (!secret)
+      return res
+        .status(500)
+        .json({ error: "Falta JWT_SECRET en el servidor." });
 
     const payload = jwt.verify(token, secret);
     if (!payload?.sub) return res.status(401).json({ error: "Token inválido." });
@@ -34,13 +37,27 @@ function looksLikeId(v) {
   return isNonEmptyString(v) && v.trim().length >= 8;
 }
 
+function parseISODateOnlyToUTC(dateStr) {
+  // dateStr esperado: "YYYY-MM-DD"
+  // Guardamos como Date UTC para evitar líos de zona horaria
+  if (!isNonEmptyString(dateStr)) return null;
+  const s = dateStr.trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0)); // mediodía UTC (más estable)
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
 export default function farmsRouter(prisma) {
   const router = express.Router();
 
   async function assertFarmOwner(farmId, userId) {
     return prisma.farm.findFirst({
       where: { id: farmId, userId },
-      select: { id: true },
+      select: { id: true, name: true, view: true, preferredCenter: true },
     });
   }
 
@@ -52,7 +69,211 @@ export default function farmsRouter(prisma) {
   }
 
   // =========================
-  // NUEVO ENDPOINT PROFESIONAL
+  // GET /api/farms
+  // =========================
+  router.get("/farms", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user.id;
+
+      const farms = await prisma.farm.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          name: true,
+          view: true,
+          preferredCenter: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.json({ farms });
+    } catch (err) {
+      console.error("GET_FARMS_ERROR:", err);
+      return res.status(500).json({ error: "Error interno listando fincas." });
+    }
+  });
+
+  // =========================
+  // POST /api/farms
+  // =========================
+  router.post("/farms", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { name, view } = req.body || {};
+
+      const finalName = cleanName(name, "Finca Demo 1");
+      const finalView = view ?? { zoom: 14, center: [-84.43, 10.32] };
+
+      const preferredCenter =
+        finalView && Array.isArray(finalView.center) ? finalView.center : null;
+
+      const farm = await prisma.farm.create({
+        data: {
+          userId,
+          name: finalName,
+          view: finalView,
+          preferredCenter,
+        },
+        select: {
+          id: true,
+          name: true,
+          view: true,
+          preferredCenter: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.status(201).json({ farm });
+    } catch (err) {
+      if (err?.code === "P2002") {
+        return res
+          .status(409)
+          .json({ error: "Ya existe una finca con ese nombre." });
+      }
+      console.error("CREATE_FARM_ERROR:", err);
+      return res.status(500).json({ error: "Error interno creando finca." });
+    }
+  });
+
+  // =========================
+  // GET /api/farms/:id/map
+  // =========================
+  router.get("/farms/:id/map", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const [points, lines, zones] = await Promise.all([
+        prisma.mapPoint.findMany({
+          where: { farmId },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, name: true, data: true, createdAt: true, updatedAt: true },
+        }),
+        prisma.mapLine.findMany({
+          where: { farmId },
+          orderBy: { createdAt: "asc" },
+          select: { id: true, name: true, data: true, createdAt: true, updatedAt: true },
+        }),
+        prisma.mapZone.findMany({
+          where: { farmId },
+          orderBy: { createdAt: "asc" },
+          select: {
+            id: true,
+            name: true,
+            data: true,
+            components: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        }),
+      ]);
+
+      return res.json({ farm, points, lines, zones });
+    } catch (err) {
+      console.error("GET_MAP_ERROR:", err);
+      return res.status(500).json({ error: "Error interno cargando mapa." });
+    }
+  });
+
+  // =========================
+  // PUT /api/farms/:id/map
+  // body: { view, points, lines, zones }
+  // =========================
+  router.put("/farms/:id/map", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const { view, points, lines, zones } = req.body || {};
+
+      const safePoints = Array.isArray(points) ? points : [];
+      const safeLines = Array.isArray(lines) ? lines : [];
+      const safeZones = Array.isArray(zones) ? zones : [];
+
+      const result = await prisma.$transaction(async (tx) => {
+        if (view) {
+          const preferredCenter =
+            view && Array.isArray(view.center) ? view.center : null;
+
+          await tx.farm.update({
+            where: { id: farmId },
+            data: {
+              view,
+              ...(preferredCenter ? { preferredCenter } : {}),
+            },
+          });
+        }
+
+        await tx.mapPoint.deleteMany({ where: { farmId } });
+        await tx.mapLine.deleteMany({ where: { farmId } });
+        await tx.mapZone.deleteMany({ where: { farmId } });
+
+        if (safePoints.length > 0) {
+          await tx.mapPoint.createMany({
+            data: safePoints.map((p) => ({
+              farmId,
+              name: cleanName(p?.name, "Punto"),
+              data: p?.data ?? p,
+            })),
+          });
+        }
+
+        if (safeLines.length > 0) {
+          await tx.mapLine.createMany({
+            data: safeLines.map((l) => ({
+              farmId,
+              name: cleanName(l?.name, "Línea"),
+              data: l?.data ?? l,
+            })),
+          });
+        }
+
+        if (safeZones.length > 0) {
+          for (const z of safeZones) {
+            await tx.mapZone.create({
+              data: {
+                farmId,
+                name: cleanName(z?.name, "Zona"),
+                data: z?.data ?? z,
+                components: z?.components ?? {},
+              },
+            });
+          }
+        }
+
+        return {
+          ok: true,
+          saved: {
+            points: safePoints.length,
+            lines: safeLines.length,
+            zones: safeZones.length,
+          },
+        };
+      });
+
+      return res.json(result);
+    } catch (err) {
+      console.error("PUT_MAP_ERROR:", err);
+      return res.status(500).json({ error: "Error interno guardando mapa." });
+    }
+  });
+
+  // =========================
   // PUT /api/farms/:farmId/zones/:zoneId/components
   // =========================
   router.put(
@@ -81,12 +302,7 @@ export default function farmsRouter(prisma) {
         const updatedZone = await prisma.mapZone.update({
           where: { id: zoneId },
           data: { components },
-          select: {
-            id: true,
-            name: true,
-            components: true,
-            updatedAt: true,
-          },
+          select: { id: true, name: true, components: true, updatedAt: true },
         });
 
         return res.json({ ok: true, zone: updatedZone });
@@ -96,6 +312,213 @@ export default function farmsRouter(prisma) {
       }
     }
   );
+
+  // ==========================================================
+  // ✅ TAREAS (asociadas a finca)
+  // ==========================================================
+
+  // GET /api/farms/:id/tasks
+  router.get("/farms/:id/tasks", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const tasks = await prisma.task.findMany({
+        where: { farmId },
+        orderBy: [{ due: "asc" }, { createdAt: "desc" }],
+        select: {
+          id: true,
+          farmId: true,
+          title: true,
+          zone: true,
+          type: true,
+          priority: true,
+          due: true,
+          status: true,
+          owner: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.json({ tasks });
+    } catch (err) {
+      console.error("GET_TASKS_ERROR:", err);
+      return res.status(500).json({ error: "Error interno listando tareas." });
+    }
+  });
+
+  // POST /api/farms/:id/tasks
+  router.post("/farms/:id/tasks", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const { title, zone, type, priority, due, status, owner } = req.body || {};
+
+      const finalTitle = cleanName(title, "");
+      if (!finalTitle) {
+        return res.status(400).json({ error: "title es requerido." });
+      }
+
+      const finalType = cleanName(type, "Mantenimiento");
+      const finalPriority = cleanName(priority, "Media");
+      const finalStatus = cleanName(status, "Pendiente");
+      const finalZone = isNonEmptyString(zone) ? zone.trim().slice(0, 120) : null;
+      const finalOwner = isNonEmptyString(owner) ? owner.trim().slice(0, 80) : null;
+
+      const dueDate = parseISODateOnlyToUTC(due);
+      if (!dueDate) {
+        return res.status(400).json({ error: "due debe ser YYYY-MM-DD." });
+      }
+
+      const task = await prisma.task.create({
+        data: {
+          farmId,
+          title: finalTitle,
+          zone: finalZone,
+          type: finalType,
+          priority: finalPriority,
+          due: dueDate,
+          status: finalStatus,
+          owner: finalOwner,
+        },
+        select: {
+          id: true,
+          farmId: true,
+          title: true,
+          zone: true,
+          type: true,
+          priority: true,
+          due: true,
+          status: true,
+          owner: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.status(201).json({ task });
+    } catch (err) {
+      console.error("CREATE_TASK_ERROR:", err);
+      return res.status(500).json({ error: "Error interno creando tarea." });
+    }
+  });
+
+  // PUT /api/farms/:id/tasks/:taskId
+  router.put("/farms/:id/tasks/:taskId", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const taskId = req.params.taskId;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId) || !looksLikeId(taskId)) {
+        return res.status(400).json({ error: "IDs inválidos." });
+      }
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      // asegurar que la tarea pertenece a esa finca
+      const existing = await prisma.task.findFirst({
+        where: { id: taskId, farmId },
+        select: { id: true },
+      });
+      if (!existing) return res.status(404).json({ error: "Tarea no encontrada." });
+
+      const { title, zone, type, priority, due, status, owner } = req.body || {};
+
+      const data = {};
+
+      if (title !== undefined) {
+        const finalTitle = cleanName(title, "");
+        if (!finalTitle) return res.status(400).json({ error: "title inválido." });
+        data.title = finalTitle;
+      }
+
+      if (zone !== undefined) {
+        data.zone = isNonEmptyString(zone) ? zone.trim().slice(0, 120) : null;
+      }
+
+      if (type !== undefined) data.type = cleanName(type, "Mantenimiento");
+      if (priority !== undefined) data.priority = cleanName(priority, "Media");
+      if (status !== undefined) data.status = cleanName(status, "Pendiente");
+
+      if (owner !== undefined) {
+        data.owner = isNonEmptyString(owner) ? owner.trim().slice(0, 80) : null;
+      }
+
+      if (due !== undefined) {
+        const dueDate = parseISODateOnlyToUTC(due);
+        if (!dueDate) return res.status(400).json({ error: "due debe ser YYYY-MM-DD." });
+        data.due = dueDate;
+      }
+
+      const task = await prisma.task.update({
+        where: { id: taskId },
+        data,
+        select: {
+          id: true,
+          farmId: true,
+          title: true,
+          zone: true,
+          type: true,
+          priority: true,
+          due: true,
+          status: true,
+          owner: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.json({ ok: true, task });
+    } catch (err) {
+      console.error("UPDATE_TASK_ERROR:", err);
+      return res.status(500).json({ error: "Error interno actualizando tarea." });
+    }
+  });
+
+  // DELETE /api/farms/:id/tasks/:taskId
+  router.delete("/farms/:id/tasks/:taskId", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const taskId = req.params.taskId;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId) || !looksLikeId(taskId)) {
+        return res.status(400).json({ error: "IDs inválidos." });
+      }
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const existing = await prisma.task.findFirst({
+        where: { id: taskId, farmId },
+        select: { id: true },
+      });
+      if (!existing) return res.status(404).json({ error: "Tarea no encontrada." });
+
+      await prisma.task.delete({ where: { id: taskId } });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("DELETE_TASK_ERROR:", err);
+      return res.status(500).json({ error: "Error interno eliminando tarea." });
+    }
+  });
 
   return router;
 }
