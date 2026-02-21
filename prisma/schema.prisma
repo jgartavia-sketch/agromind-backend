@@ -4,7 +4,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -31,11 +30,12 @@ model Farm {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  points MapPoint[]
-  lines  MapLine[]
-  zones  MapZone[]
-  tasks  Task[]
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  points    MapPoint[]
+  lines     MapLine[]
+  zones     MapZone[]
+  tasks     Task[]
+  movements FinanceMovement[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -102,4 +102,28 @@ model Task {
 
   @@index([farmId])
   @@index([farmId, due])
+}
+
+model FinanceMovement {
+  id        String   @id @default(cuid())
+  farmId    String
+
+  // Fecha del movimiento (para reportes y gráficos)
+  date      DateTime
+
+  // Detalle del movimiento
+  concept   String
+  category  String
+  type      String   // "Ingreso" | "Gasto"
+  amount    Float
+  note      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+
+  @@index([farmId])
+  @@index([farmId, date])
+  @@index([farmId, type])
 }

@@ -51,6 +51,49 @@ function parseISODateOnlyToUTC(dateStr) {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
+function parseDateAnyToUTC(value) {
+  // Acepta "YYYY-MM-DD" o ISO string o Date
+  if (!value) return null;
+
+  if (typeof value === "string") {
+    const s = value.trim();
+    const only = parseISODateOnlyToUTC(s);
+    if (only) return only;
+
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  // por si llega número timestamp
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function parseAmount(v) {
+  const n =
+    typeof v === "number"
+      ? v
+      : typeof v === "string"
+      ? Number(v.replaceAll(",", "").trim())
+      : NaN;
+
+  if (Number.isNaN(n)) return null;
+  if (!Number.isFinite(n)) return null;
+  if (n < 0) return null;
+  return n;
+}
+
+function normalizeType(v) {
+  const s = isNonEmptyString(v) ? v.trim() : "";
+  if (s === "Ingreso") return "Ingreso";
+  if (s === "Gasto") return "Gasto";
+  return null;
+}
+
 export default function farmsRouter(prisma) {
   const router = express.Router();
 
@@ -103,8 +146,11 @@ export default function farmsRouter(prisma) {
       const userId = req.user.id;
       const { name, view } = req.body || {};
 
-      const finalName = cleanName(name, "Finca Demo 1");
-      const finalView = view ?? { zoom: 14, center: [-84.43, 10.32] };
+      // ✅ Producción real: finca por defecto "Mi finca"
+      const finalName = cleanName(name, "Mi finca");
+
+      // Si el frontend no manda view, se guarda null (no inventamos demo)
+      const finalView = view ?? null;
 
       const preferredCenter =
         finalView && Array.isArray(finalView.center) ? finalView.center : null;
@@ -113,8 +159,8 @@ export default function farmsRouter(prisma) {
         data: {
           userId,
           name: finalName,
-          view: finalView,
-          preferredCenter,
+          ...(finalView ? { view: finalView } : {}),
+          ...(preferredCenter ? { preferredCenter } : {}),
         },
         select: {
           id: true,
@@ -431,7 +477,6 @@ export default function farmsRouter(prisma) {
       const farm = await assertFarmOwner(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
-      // asegurar que la tarea pertenece a esa finca
       const existing = await prisma.task.findFirst({
         where: { id: taskId, farmId },
         select: { id: true },
@@ -519,6 +564,234 @@ export default function farmsRouter(prisma) {
       return res.status(500).json({ error: "Error interno eliminando tarea." });
     }
   });
+
+  // ==========================================================
+  // ✅ FINANZAS (movimientos asociados a finca)
+  // ==========================================================
+
+  // GET /api/farms/:id/finance/movements
+  router.get("/farms/:id/finance/movements", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const movements = await prisma.financeMovement.findMany({
+        where: { farmId },
+        orderBy: [{ date: "desc" }, { createdAt: "desc" }],
+        select: {
+          id: true,
+          farmId: true,
+          date: true,
+          concept: true,
+          category: true,
+          type: true,
+          amount: true,
+          note: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.json({ movements });
+    } catch (err) {
+      console.error("GET_FINANCE_MOVEMENTS_ERROR:", err);
+      return res
+        .status(500)
+        .json({ error: "Error interno listando movimientos." });
+    }
+  });
+
+  // POST /api/farms/:id/finance/movements
+  router.post("/farms/:id/finance/movements", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const { date, concept, category, type, amount, note } = req.body || {};
+
+      const finalConcept = isNonEmptyString(concept) ? concept.trim().slice(0, 160) : "";
+      if (!finalConcept) return res.status(400).json({ error: "concept es requerido." });
+
+      const finalCategory = isNonEmptyString(category)
+        ? category.trim().slice(0, 80)
+        : "General";
+
+      const finalType = normalizeType(type);
+      if (!finalType) return res.status(400).json({ error: 'type debe ser "Ingreso" o "Gasto".' });
+
+      const finalAmount = parseAmount(amount);
+      if (finalAmount === null) return res.status(400).json({ error: "amount inválido (debe ser número >= 0)." });
+
+      const finalDate = parseDateAnyToUTC(date) || new Date();
+      if (!finalDate) return res.status(400).json({ error: "date inválida." });
+
+      const finalNote = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
+
+      const movement = await prisma.financeMovement.create({
+        data: {
+          farmId,
+          date: finalDate,
+          concept: finalConcept,
+          category: finalCategory,
+          type: finalType,
+          amount: finalAmount,
+          note: finalNote,
+        },
+        select: {
+          id: true,
+          farmId: true,
+          date: true,
+          concept: true,
+          category: true,
+          type: true,
+          amount: true,
+          note: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.status(201).json({ movement });
+    } catch (err) {
+      console.error("CREATE_FINANCE_MOVEMENT_ERROR:", err);
+      return res.status(500).json({ error: "Error interno creando movimiento." });
+    }
+  });
+
+  // PUT /api/farms/:id/finance/movements/:movementId
+  router.put(
+    "/farms/:id/finance/movements/:movementId",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const farmId = req.params.id;
+        const movementId = req.params.movementId;
+        const userId = req.user.id;
+
+        if (!looksLikeId(farmId) || !looksLikeId(movementId)) {
+          return res.status(400).json({ error: "IDs inválidos." });
+        }
+
+        const farm = await assertFarmOwner(farmId, userId);
+        if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+        const existing = await prisma.financeMovement.findFirst({
+          where: { id: movementId, farmId },
+          select: { id: true },
+        });
+        if (!existing) return res.status(404).json({ error: "Movimiento no encontrado." });
+
+        const { date, concept, category, type, amount, note } = req.body || {};
+
+        const data = {};
+
+        if (concept !== undefined) {
+          const finalConcept = isNonEmptyString(concept)
+            ? concept.trim().slice(0, 160)
+            : "";
+          if (!finalConcept) return res.status(400).json({ error: "concept inválido." });
+          data.concept = finalConcept;
+        }
+
+        if (category !== undefined) {
+          data.category = isNonEmptyString(category)
+            ? category.trim().slice(0, 80)
+            : "General";
+        }
+
+        if (type !== undefined) {
+          const finalType = normalizeType(type);
+          if (!finalType)
+            return res.status(400).json({ error: 'type debe ser "Ingreso" o "Gasto".' });
+          data.type = finalType;
+        }
+
+        if (amount !== undefined) {
+          const finalAmount = parseAmount(amount);
+          if (finalAmount === null)
+            return res.status(400).json({ error: "amount inválido (debe ser número >= 0)." });
+          data.amount = finalAmount;
+        }
+
+        if (date !== undefined) {
+          const finalDate = parseDateAnyToUTC(date);
+          if (!finalDate) return res.status(400).json({ error: "date inválida." });
+          data.date = finalDate;
+        }
+
+        if (note !== undefined) {
+          data.note = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
+        }
+
+        const movement = await prisma.financeMovement.update({
+          where: { id: movementId },
+          data,
+          select: {
+            id: true,
+            farmId: true,
+            date: true,
+            concept: true,
+            category: true,
+            type: true,
+            amount: true,
+            note: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        return res.json({ ok: true, movement });
+      } catch (err) {
+        console.error("UPDATE_FINANCE_MOVEMENT_ERROR:", err);
+        return res.status(500).json({ error: "Error interno actualizando movimiento." });
+      }
+    }
+  );
+
+  // DELETE /api/farms/:id/finance/movements/:movementId
+  router.delete(
+    "/farms/:id/finance/movements/:movementId",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const farmId = req.params.id;
+        const movementId = req.params.movementId;
+        const userId = req.user.id;
+
+        if (!looksLikeId(farmId) || !looksLikeId(movementId)) {
+          return res.status(400).json({ error: "IDs inválidos." });
+        }
+
+        const farm = await assertFarmOwner(farmId, userId);
+        if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+        const existing = await prisma.financeMovement.findFirst({
+          where: { id: movementId, farmId },
+          select: { id: true },
+        });
+        if (!existing) return res.status(404).json({ error: "Movimiento no encontrado." });
+
+        await prisma.financeMovement.delete({ where: { id: movementId } });
+
+        return res.json({ ok: true });
+      } catch (err) {
+        console.error("DELETE_FINANCE_MOVEMENT_ERROR:", err);
+        return res.status(500).json({ error: "Error interno eliminando movimiento." });
+      }
+    }
+  );
 
   return router;
 }
