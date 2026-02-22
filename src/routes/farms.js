@@ -97,6 +97,13 @@ function toYYYYMMDD(value) {
   return d.toISOString().slice(0, 10);
 }
 
+// ✅ nuevo helper: factura opcional
+function cleanInvoiceNumber(v) {
+  if (v === undefined) return undefined; // "no tocar" en PUT si no lo envían
+  if (!isNonEmptyString(v)) return null; // vacío → null
+  return v.trim().slice(0, 80);
+}
+
 export default function farmsRouter(prisma) {
   const router = express.Router();
 
@@ -1055,6 +1062,7 @@ export default function farmsRouter(prisma) {
           type: true,
           amount: true,
           note: true,
+          invoiceNumber: true, // ✅ nuevo
           createdAt: true,
           updatedAt: true,
         },
@@ -1080,25 +1088,40 @@ export default function farmsRouter(prisma) {
       const farm = await assertFarmOwner(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
-      const { date, concept, category, type, amount, note } = req.body || {};
+      const { date, concept, category, type, amount, note, invoiceNumber } =
+        req.body || {};
 
-      const finalConcept = isNonEmptyString(concept) ? concept.trim().slice(0, 160) : "";
-      if (!finalConcept) return res.status(400).json({ error: "concept es requerido." });
+      const finalConcept = isNonEmptyString(concept)
+        ? concept.trim().slice(0, 160)
+        : "";
+      if (!finalConcept)
+        return res.status(400).json({ error: "concept es requerido." });
 
       const finalCategory = isNonEmptyString(category)
         ? category.trim().slice(0, 80)
         : "General";
 
       const finalType = normalizeType(type);
-      if (!finalType) return res.status(400).json({ error: 'type debe ser "Ingreso" o "Gasto".' });
+      if (!finalType)
+        return res
+          .status(400)
+          .json({ error: 'type debe ser "Ingreso" o "Gasto".' });
 
       const finalAmount = parseAmount(amount);
-      if (finalAmount === null) return res.status(400).json({ error: "amount inválido (debe ser número >= 0)." });
+      if (finalAmount === null)
+        return res
+          .status(400)
+          .json({ error: "amount inválido (debe ser número >= 0)." });
 
       const finalDate = parseDateAnyToUTC(date) || new Date();
       if (!finalDate) return res.status(400).json({ error: "date inválida." });
 
       const finalNote = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
+
+      const finalInvoiceNumber = cleanInvoiceNumber(invoiceNumber);
+      // en POST si no lo envían → undefined; lo convertimos a null para consistencia
+      const invoiceToSave =
+        finalInvoiceNumber === undefined ? null : finalInvoiceNumber;
 
       const movement = await prisma.financeMovement.create({
         data: {
@@ -1109,6 +1132,7 @@ export default function farmsRouter(prisma) {
           type: finalType,
           amount: finalAmount,
           note: finalNote,
+          invoiceNumber: invoiceToSave, // ✅ nuevo
         },
         select: {
           id: true,
@@ -1119,6 +1143,7 @@ export default function farmsRouter(prisma) {
           type: true,
           amount: true,
           note: true,
+          invoiceNumber: true, // ✅ nuevo
           createdAt: true,
           updatedAt: true,
         },
@@ -1153,7 +1178,8 @@ export default function farmsRouter(prisma) {
         });
         if (!existing) return res.status(404).json({ error: "Movimiento no encontrado." });
 
-        const { date, concept, category, type, amount, note } = req.body || {};
+        const { date, concept, category, type, amount, note, invoiceNumber } =
+          req.body || {};
 
         const data = {};
 
@@ -1195,6 +1221,12 @@ export default function farmsRouter(prisma) {
           data.note = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
         }
 
+        // ✅ nuevo: factura opcional (si no viene, no se toca)
+        const finalInvoiceNumber = cleanInvoiceNumber(invoiceNumber);
+        if (finalInvoiceNumber !== undefined) {
+          data.invoiceNumber = finalInvoiceNumber; // string o null
+        }
+
         const movement = await prisma.financeMovement.update({
           where: { id: movementId },
           data,
@@ -1207,6 +1239,7 @@ export default function farmsRouter(prisma) {
             type: true,
             amount: true,
             note: true,
+            invoiceNumber: true, // ✅ nuevo
             createdAt: true,
             updatedAt: true,
           },
