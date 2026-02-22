@@ -38,8 +38,6 @@ function looksLikeId(v) {
 }
 
 function parseISODateOnlyToUTC(dateStr) {
-  // dateStr esperado: "YYYY-MM-DD"
-  // Guardamos como Date UTC para evitar líos de zona horaria
   if (!isNonEmptyString(dateStr)) return null;
   const s = dateStr.trim();
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
@@ -47,12 +45,11 @@ function parseISODateOnlyToUTC(dateStr) {
   const y = Number(m[1]);
   const mo = Number(m[2]);
   const d = Number(m[3]);
-  const dt = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0)); // mediodía UTC (más estable)
+  const dt = new Date(Date.UTC(y, mo - 1, d, 12, 0, 0));
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
 function parseDateAnyToUTC(value) {
-  // Acepta "YYYY-MM-DD" o ISO string o Date
   if (!value) return null;
 
   if (typeof value === "string") {
@@ -68,7 +65,6 @@ function parseDateAnyToUTC(value) {
     return Number.isNaN(value.getTime()) ? null : value;
   }
 
-  // por si llega número timestamp
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
 }
@@ -146,10 +142,7 @@ export default function farmsRouter(prisma) {
       const userId = req.user.id;
       const { name, view } = req.body || {};
 
-      // ✅ Producción real: finca por defecto "Mi finca"
       const finalName = cleanName(name, "Mi finca");
-
-      // Si el frontend no manda view, se guarda null (no inventamos demo)
       const finalView = view ?? null;
 
       const preferredCenter =
@@ -232,7 +225,6 @@ export default function farmsRouter(prisma) {
 
   // =========================
   // PUT /api/farms/:id/map
-  // body: { view, points, lines, zones }
   // =========================
   router.put("/farms/:id/map", requireAuth, async (req, res) => {
     try {
@@ -385,6 +377,7 @@ export default function farmsRouter(prisma) {
           zone: true,
           type: true,
           priority: true,
+          start: true,
           due: true,
           status: true,
           owner: true,
@@ -412,7 +405,7 @@ export default function farmsRouter(prisma) {
       const farm = await assertFarmOwner(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
-      const { title, zone, type, priority, due, status, owner } = req.body || {};
+      const { title, zone, type, priority, start, due, status, owner } = req.body || {};
 
       const finalTitle = cleanName(title, "");
       if (!finalTitle) {
@@ -425,9 +418,18 @@ export default function farmsRouter(prisma) {
       const finalZone = isNonEmptyString(zone) ? zone.trim().slice(0, 120) : null;
       const finalOwner = isNonEmptyString(owner) ? owner.trim().slice(0, 80) : null;
 
+      const startDate = parseISODateOnlyToUTC(start);
+      if (!startDate) {
+        return res.status(400).json({ error: "start debe ser YYYY-MM-DD." });
+      }
+
       const dueDate = parseISODateOnlyToUTC(due);
       if (!dueDate) {
         return res.status(400).json({ error: "due debe ser YYYY-MM-DD." });
+      }
+
+      if (startDate.getTime() > dueDate.getTime()) {
+        return res.status(400).json({ error: "start no puede ser posterior a due." });
       }
 
       const task = await prisma.task.create({
@@ -437,6 +439,7 @@ export default function farmsRouter(prisma) {
           zone: finalZone,
           type: finalType,
           priority: finalPriority,
+          start: startDate,
           due: dueDate,
           status: finalStatus,
           owner: finalOwner,
@@ -448,6 +451,7 @@ export default function farmsRouter(prisma) {
           zone: true,
           type: true,
           priority: true,
+          start: true,
           due: true,
           status: true,
           owner: true,
@@ -479,11 +483,11 @@ export default function farmsRouter(prisma) {
 
       const existing = await prisma.task.findFirst({
         where: { id: taskId, farmId },
-        select: { id: true },
+        select: { id: true, start: true, due: true },
       });
       if (!existing) return res.status(404).json({ error: "Tarea no encontrada." });
 
-      const { title, zone, type, priority, due, status, owner } = req.body || {};
+      const { title, zone, type, priority, start, due, status, owner } = req.body || {};
 
       const data = {};
 
@@ -505,10 +509,25 @@ export default function farmsRouter(prisma) {
         data.owner = isNonEmptyString(owner) ? owner.trim().slice(0, 80) : null;
       }
 
+      let nextStart = existing.start;
+      let nextDue = existing.due;
+
+      if (start !== undefined) {
+        const startDate = parseISODateOnlyToUTC(start);
+        if (!startDate) return res.status(400).json({ error: "start debe ser YYYY-MM-DD." });
+        data.start = startDate;
+        nextStart = startDate;
+      }
+
       if (due !== undefined) {
         const dueDate = parseISODateOnlyToUTC(due);
         if (!dueDate) return res.status(400).json({ error: "due debe ser YYYY-MM-DD." });
         data.due = dueDate;
+        nextDue = dueDate;
+      }
+
+      if (nextStart.getTime() > nextDue.getTime()) {
+        return res.status(400).json({ error: "start no puede ser posterior a due." });
       }
 
       const task = await prisma.task.update({
@@ -521,6 +540,7 @@ export default function farmsRouter(prisma) {
           zone: true,
           type: true,
           priority: true,
+          start: true,
           due: true,
           status: true,
           owner: true,
@@ -569,7 +589,6 @@ export default function farmsRouter(prisma) {
   // ✅ FINANZAS (movimientos asociados a finca)
   // ==========================================================
 
-  // GET /api/farms/:id/finance/movements
   router.get("/farms/:id/finance/movements", requireAuth, async (req, res) => {
     try {
       const farmId = req.params.id;
@@ -607,7 +626,6 @@ export default function farmsRouter(prisma) {
     }
   });
 
-  // POST /api/farms/:id/finance/movements
   router.post("/farms/:id/finance/movements", requireAuth, async (req, res) => {
     try {
       const farmId = req.params.id;
@@ -670,7 +688,6 @@ export default function farmsRouter(prisma) {
     }
   });
 
-  // PUT /api/farms/:id/finance/movements/:movementId
   router.put(
     "/farms/:id/finance/movements/:movementId",
     requireAuth,
@@ -760,7 +777,6 @@ export default function farmsRouter(prisma) {
     }
   );
 
-  // DELETE /api/farms/:id/finance/movements/:movementId
   router.delete(
     "/farms/:id/finance/movements/:movementId",
     requireAuth,

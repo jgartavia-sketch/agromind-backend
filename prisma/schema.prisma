@@ -24,13 +24,12 @@ model Farm {
   view            Json?
   preferredCenter Json?
 
-  // ✅ Para gobernar “finca principal” (la regla se hace en backend)
   isPrimary       Boolean  @default(false)
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   points    MapPoint[]
   lines     MapLine[]
   zones     MapZone[]
@@ -92,7 +91,13 @@ model Task {
   zone      String?
   type      String
   priority  String
+
+  // ✅ fecha inicio (YA obligatoria)
+  start     DateTime
+
+  // ✅ fecha de vencimiento
   due       DateTime
+
   status    String
   owner     String?
   createdAt DateTime @default(now())
@@ -101,6 +106,7 @@ model Task {
   farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
 
   @@index([farmId])
+  @@index([farmId, start])
   @@index([farmId, due])
 }
 
@@ -108,13 +114,10 @@ model FinanceMovement {
   id        String   @id @default(cuid())
   farmId    String
 
-  // Fecha del movimiento (para reportes y gráficos)
   date      DateTime
-
-  // Detalle del movimiento
   concept   String
   category  String
-  type      String   // "Ingreso" | "Gasto"
+  type      String
   amount    Float
   note      String?
 
