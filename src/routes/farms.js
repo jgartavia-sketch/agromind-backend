@@ -97,11 +97,47 @@ function toYYYYMMDD(value) {
   return d.toISOString().slice(0, 10);
 }
 
-// ✅ nuevo helper: factura opcional
-function cleanInvoiceNumber(v) {
-  if (v === undefined) return undefined; // "no tocar" en PUT si no lo envían
-  if (!isNonEmptyString(v)) return null; // vacío → null
+function parseInvoiceNumber(v) {
+  if (v === undefined) return undefined; // no tocar si no viene
+  if (v === null) return null;
+  if (!isNonEmptyString(v)) return null;
   return v.trim().slice(0, 80);
+}
+
+// Clasificación simple por palabras clave (solo si categoría es vacía/General)
+function classifyCategoryByConcept(concept) {
+  const t = String(concept || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const dict = [
+    { keys: ["urea", "fertiliz", "abono"], cat: "Fertilizantes" },
+    { keys: ["concentrado", "alimento", "melaza"], cat: "Alimentación" },
+    { keys: ["diesel", "diésel", "gasolina", "combustible"], cat: "Transporte" },
+    { keys: ["vacuna", "vitamina", "desparas", "sanidad"], cat: "Sanidad" },
+  ];
+
+  for (const d of dict) {
+    if (d.keys.some((k) => t.includes(k))) return d.cat;
+  }
+  return null;
+}
+
+function monthKeyUTC(d) {
+  const dt = d instanceof Date ? d : new Date(d);
+  if (Number.isNaN(dt.getTime())) return "";
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function startOfUTCMonth(year, monthIndex0) {
+  return new Date(Date.UTC(year, monthIndex0, 1, 0, 0, 0));
+}
+
+function endOfUTCMonth(year, monthIndex0) {
+  return new Date(Date.UTC(year, monthIndex0 + 1, 1, 0, 0, 0));
 }
 
 export default function farmsRouter(prisma) {
@@ -512,7 +548,6 @@ export default function farmsRouter(prisma) {
         return [];
       }
 
-      // ✅ FIX CLAVE: escoger el primer arreglo NO VACÍO (no usar || con arrays)
       function firstNonEmptyList(...candidates) {
         for (const cand of candidates) {
           const arr = listFromUnknown(cand);
@@ -541,7 +576,6 @@ export default function farmsRouter(prisma) {
           c.ganado
         );
 
-        // fallback: llaves sueltas y no se detectó crops/animals
         let other = [];
         if (crops.length === 0 && animals.length === 0) {
           other = listFromUnknown(c);
@@ -575,7 +609,6 @@ export default function farmsRouter(prisma) {
 
         const { crops, animals, other } = extractComponents(z.components);
 
-        // Cultivos
         for (const crop of crops) {
           if (!hasSimilarActiveTask(zoneName, ["abonar", "fertiliz", crop])) {
             pushSuggestion({
@@ -597,30 +630,8 @@ export default function farmsRouter(prisma) {
               },
             });
           }
-
-          if (!hasSimilarActiveTask(zoneName, ["poda", "podar", crop])) {
-            pushSuggestion({
-              id: `prune_${zoneName}_${crop}`.slice(0, 180),
-              code: "ZONE_COMPONENT_CROP_PRUNE",
-              level: "info",
-              title: "Mantenimiento del cultivo",
-              message: `Zona "${zoneName}": considerar poda/limpieza y control de malezas para (${crop}).`,
-              zone: zoneName,
-              actionPayload: {
-                title: `Poda/limpieza (${crop})`,
-                zone: zoneName,
-                type: "Mantenimiento",
-                priority: "Media",
-                start: todayStr,
-                due: todayStr,
-                status: "Pendiente",
-                owner: "",
-              },
-            });
-          }
         }
 
-        // Animales
         for (const animal of animals) {
           if (!hasSimilarActiveTask(zoneName, ["aliment", "agua", animal])) {
             pushSuggestion({
@@ -642,59 +653,8 @@ export default function farmsRouter(prisma) {
               },
             });
           }
-
-          if (!hasSimilarActiveTask(zoneName, ["limpieza", "higiene", "corral", animal])) {
-            pushSuggestion({
-              id: `animal_clean_${zoneName}_${animal}`.slice(0, 180),
-              code: "ZONE_COMPONENT_ANIMAL_CLEAN",
-              level: "info",
-              title: "Orden y limpieza",
-              message: `Zona "${zoneName}": planificar limpieza/orden del área para (${animal}).`,
-              zone: zoneName,
-              actionPayload: {
-                title: `Limpieza del área (${animal})`,
-                zone: zoneName,
-                type: "Mantenimiento",
-                priority: "Media",
-                start: todayStr,
-                due: todayStr,
-                status: "Pendiente",
-                owner: "",
-              },
-            });
-          }
-
-          if (
-            !hasSimilarActiveTask(zoneName, [
-              "revision sanitaria",
-              "sanidad",
-              "vacun",
-              "desparas",
-              animal,
-            ])
-          ) {
-            pushSuggestion({
-              id: `animal_health_${zoneName}_${animal}`.slice(0, 180),
-              code: "ZONE_COMPONENT_ANIMAL_HEALTH",
-              level: "info",
-              title: "Chequeo sanitario",
-              message: `Zona "${zoneName}": revisar plan sanitario (ej. vacunas/desparasitación) para (${animal}) según tu calendario.`,
-              zone: zoneName,
-              actionPayload: {
-                title: `Chequeo sanitario (${animal})`,
-                zone: zoneName,
-                type: "Mantenimiento",
-                priority: "Media",
-                start: todayStr,
-                due: todayStr,
-                status: "Pendiente",
-                owner: "",
-              },
-            });
-          }
         }
 
-        // Otros → inspección genérica
         if (crops.length === 0 && animals.length === 0 && other.length > 0) {
           if (!hasSimilarActiveTask(zoneName, ["inspeccion", "inspección", "revision", "revisión"])) {
             pushSuggestion({
@@ -716,123 +676,6 @@ export default function farmsRouter(prisma) {
               },
             });
           }
-        }
-      }
-
-      // ==========================================================
-      // 1) Regla: vencen pronto (<= 2 días)
-      // ==========================================================
-      for (const t of tasks) {
-        if (!t?.due || !t?.title) continue;
-        if (t.status === "Completada") continue;
-
-        const dueDate = new Date(t.due);
-        const diffDays = Math.ceil((dueDate.getTime() - todayUtcNoon.getTime()) / MS_DAY);
-
-        if (diffDays >= 0 && diffDays <= 2) {
-          const dueStr = toYYYYMMDD(dueDate);
-          const startStr = toYYYYMMDD(t.start || dueDate);
-
-          pushSuggestion({
-            id: `due_soon_${t.id}`,
-            code: "DUE_SOON",
-            level: diffDays === 0 ? "alert" : "warning",
-            title: diffDays === 0 ? "Vence hoy" : "Vence pronto",
-            message:
-              diffDays === 0
-                ? `La tarea "${t.title}" vence hoy.`
-                : `La tarea "${t.title}" vence en ${diffDays} día(s).`,
-            zone: t.zone || null,
-            actionPayload: {
-              title: `Seguimiento: ${t.title}`,
-              zone: t.zone || "",
-              type: t.type || "Mantenimiento",
-              priority: "Alta",
-              start: startStr,
-              due: dueStr,
-              status: "Pendiente",
-              owner: t.owner || "",
-            },
-          });
-        }
-      }
-
-      // ==========================================================
-      // 2) Regla: zonas sin tareas activas
-      // ==========================================================
-      for (const zn of zoneNames) {
-        const hasActive = tasks.some(
-          (t) => (t.zone || "").trim() === zn && t.status !== "Completada"
-        );
-        if (!hasActive) {
-          pushSuggestion({
-            id: `zone_empty_${zn}`,
-            code: "ZONE_NO_ACTIVE_TASKS",
-            level: "info",
-            title: "Zona sin tareas activas",
-            message: `La zona "${zn}" no tiene tareas activas.`,
-            zone: zn,
-            actionPayload: {
-              title: `Inspección preventiva - ${zn}`,
-              zone: zn,
-              type: "Mantenimiento",
-              priority: "Media",
-              start: todayStr,
-              due: todayStr,
-              status: "Pendiente",
-              owner: "",
-            },
-          });
-        }
-      }
-
-      // ==========================================================
-      // 3) Regla: demasiadas pendientes (>= 5)
-      // ==========================================================
-      const pendingCount = tasks.filter((t) => t.status === "Pendiente").length;
-      if (pendingCount >= 5) {
-        pushSuggestion({
-          id: `too_many_pending_${pendingCount}`,
-          code: "TOO_MANY_PENDING",
-          level: "warning",
-          title: "Carga alta de pendientes",
-          message: `Tenés ${pendingCount} tareas en estado "Pendiente". Considerá priorizar o dividir trabajo.`,
-          zone: null,
-          actionPayload: null,
-        });
-      }
-
-      // ==========================================================
-      // 4) Regla: atrasadas
-      // ==========================================================
-      for (const t of tasks) {
-        if (!t?.due || !t?.title) continue;
-        if (t.status === "Completada") continue;
-
-        const dueDate = new Date(t.due);
-        const diffDays = Math.floor((todayUtcNoon.getTime() - dueDate.getTime()) / MS_DAY);
-        if (diffDays >= 1) {
-          const dueStr = toYYYYMMDD(dueDate);
-          const startStr = toYYYYMMDD(t.start || dueDate);
-
-          pushSuggestion({
-            id: `overdue_${t.id}`,
-            code: "OVERDUE",
-            level: "alert",
-            title: "Tarea atrasada",
-            message: `La tarea "${t.title}" está atrasada por ${diffDays} día(s).`,
-            zone: t.zone || null,
-            actionPayload: {
-              title: `Reprogramar: ${t.title}`,
-              zone: t.zone || "",
-              type: t.type || "Mantenimiento",
-              priority: "Alta",
-              start: startStr,
-              due: toYYYYMMDD(todayUtcNoon),
-              status: "Pendiente",
-              owner: t.owner || "",
-            },
-          });
         }
       }
 
@@ -917,124 +760,6 @@ export default function farmsRouter(prisma) {
     }
   });
 
-  // PUT /api/farms/:id/tasks/:taskId
-  router.put("/farms/:id/tasks/:taskId", requireAuth, async (req, res) => {
-    try {
-      const farmId = req.params.id;
-      const taskId = req.params.taskId;
-      const userId = req.user.id;
-
-      if (!looksLikeId(farmId) || !looksLikeId(taskId)) {
-        return res.status(400).json({ error: "IDs inválidos." });
-      }
-
-      const farm = await assertFarmOwner(farmId, userId);
-      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
-
-      const existing = await prisma.task.findFirst({
-        where: { id: taskId, farmId },
-        select: { id: true, start: true, due: true },
-      });
-      if (!existing) return res.status(404).json({ error: "Tarea no encontrada." });
-
-      const { title, zone, type, priority, start, due, status, owner } = req.body || {};
-
-      const data = {};
-
-      if (title !== undefined) {
-        const finalTitle = cleanName(title, "");
-        if (!finalTitle) return res.status(400).json({ error: "title inválido." });
-        data.title = finalTitle;
-      }
-
-      if (zone !== undefined) {
-        data.zone = isNonEmptyString(zone) ? zone.trim().slice(0, 120) : null;
-      }
-
-      if (type !== undefined) data.type = cleanName(type, "Mantenimiento");
-      if (priority !== undefined) data.priority = cleanName(priority, "Media");
-      if (status !== undefined) data.status = cleanName(status, "Pendiente");
-
-      if (owner !== undefined) {
-        data.owner = isNonEmptyString(owner) ? owner.trim().slice(0, 80) : null;
-      }
-
-      let nextStart = existing.start;
-      let nextDue = existing.due;
-
-      if (start !== undefined) {
-        const startDate = parseISODateOnlyToUTC(start);
-        if (!startDate) return res.status(400).json({ error: "start debe ser YYYY-MM-DD." });
-        data.start = startDate;
-        nextStart = startDate;
-      }
-
-      if (due !== undefined) {
-        const dueDate = parseISODateOnlyToUTC(due);
-        if (!dueDate) return res.status(400).json({ error: "due debe ser YYYY-MM-DD." });
-        data.due = dueDate;
-        nextDue = dueDate;
-      }
-
-      if (nextStart.getTime() > nextDue.getTime()) {
-        return res.status(400).json({ error: "start no puede ser posterior a due." });
-      }
-
-      const task = await prisma.task.update({
-        where: { id: taskId },
-        data,
-        select: {
-          id: true,
-          farmId: true,
-          title: true,
-          zone: true,
-          type: true,
-          priority: true,
-          start: true,
-          due: true,
-          status: true,
-          owner: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      });
-
-      return res.json({ ok: true, task });
-    } catch (err) {
-      console.error("UPDATE_TASK_ERROR:", err);
-      return res.status(500).json({ error: "Error interno actualizando tarea." });
-    }
-  });
-
-  // DELETE /api/farms/:id/tasks/:taskId
-  router.delete("/farms/:id/tasks/:taskId", requireAuth, async (req, res) => {
-    try {
-      const farmId = req.params.id;
-      const taskId = req.params.taskId;
-      const userId = req.user.id;
-
-      if (!looksLikeId(farmId) || !looksLikeId(taskId)) {
-        return res.status(400).json({ error: "IDs inválidos." });
-      }
-
-      const farm = await assertFarmOwner(farmId, userId);
-      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
-
-      const existing = await prisma.task.findFirst({
-        where: { id: taskId, farmId },
-        select: { id: true },
-      });
-      if (!existing) return res.status(404).json({ error: "Tarea no encontrada." });
-
-      await prisma.task.delete({ where: { id: taskId } });
-
-      return res.json({ ok: true });
-    } catch (err) {
-      console.error("DELETE_TASK_ERROR:", err);
-      return res.status(500).json({ error: "Error interno eliminando tarea." });
-    }
-  });
-
   // ==========================================================
   // ✅ FINANZAS (movimientos asociados a finca)
   // ==========================================================
@@ -1061,8 +786,8 @@ export default function farmsRouter(prisma) {
           category: true,
           type: true,
           amount: true,
+          invoiceNumber: true,
           note: true,
-          invoiceNumber: true, // ✅ nuevo
           createdAt: true,
           updatedAt: true,
         },
@@ -1088,40 +813,31 @@ export default function farmsRouter(prisma) {
       const farm = await assertFarmOwner(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
-      const { date, concept, category, type, amount, note, invoiceNumber } =
-        req.body || {};
+      const { date, concept, category, type, amount, invoiceNumber, note } = req.body || {};
 
-      const finalConcept = isNonEmptyString(concept)
-        ? concept.trim().slice(0, 160)
-        : "";
-      if (!finalConcept)
-        return res.status(400).json({ error: "concept es requerido." });
+      const finalConcept = isNonEmptyString(concept) ? concept.trim().slice(0, 160) : "";
+      if (!finalConcept) return res.status(400).json({ error: "concept es requerido." });
 
-      const finalCategory = isNonEmptyString(category)
+      let finalCategory = isNonEmptyString(category)
         ? category.trim().slice(0, 80)
         : "General";
 
+      if (!isNonEmptyString(finalCategory) || finalCategory === "General") {
+        const auto = classifyCategoryByConcept(finalConcept);
+        if (auto) finalCategory = auto;
+      }
+
       const finalType = normalizeType(type);
-      if (!finalType)
-        return res
-          .status(400)
-          .json({ error: 'type debe ser "Ingreso" o "Gasto".' });
+      if (!finalType) return res.status(400).json({ error: 'type debe ser "Ingreso" o "Gasto".' });
 
       const finalAmount = parseAmount(amount);
-      if (finalAmount === null)
-        return res
-          .status(400)
-          .json({ error: "amount inválido (debe ser número >= 0)." });
+      if (finalAmount === null) return res.status(400).json({ error: "amount inválido (debe ser número >= 0)." });
 
       const finalDate = parseDateAnyToUTC(date) || new Date();
       if (!finalDate) return res.status(400).json({ error: "date inválida." });
 
+      const finalInvoiceNumber = parseInvoiceNumber(invoiceNumber);
       const finalNote = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
-
-      const finalInvoiceNumber = cleanInvoiceNumber(invoiceNumber);
-      // en POST si no lo envían → undefined; lo convertimos a null para consistencia
-      const invoiceToSave =
-        finalInvoiceNumber === undefined ? null : finalInvoiceNumber;
 
       const movement = await prisma.financeMovement.create({
         data: {
@@ -1131,8 +847,8 @@ export default function farmsRouter(prisma) {
           category: finalCategory,
           type: finalType,
           amount: finalAmount,
+          invoiceNumber: finalInvoiceNumber ?? null,
           note: finalNote,
-          invoiceNumber: invoiceToSave, // ✅ nuevo
         },
         select: {
           id: true,
@@ -1142,8 +858,8 @@ export default function farmsRouter(prisma) {
           category: true,
           type: true,
           amount: true,
+          invoiceNumber: true,
           note: true,
-          invoiceNumber: true, // ✅ nuevo
           createdAt: true,
           updatedAt: true,
         },
@@ -1178,8 +894,7 @@ export default function farmsRouter(prisma) {
         });
         if (!existing) return res.status(404).json({ error: "Movimiento no encontrado." });
 
-        const { date, concept, category, type, amount, note, invoiceNumber } =
-          req.body || {};
+        const { date, concept, category, type, amount, invoiceNumber, note } = req.body || {};
 
         const data = {};
 
@@ -1189,12 +904,24 @@ export default function farmsRouter(prisma) {
             : "";
           if (!finalConcept) return res.status(400).json({ error: "concept inválido." });
           data.concept = finalConcept;
+
+          // si además no nos pasan categoría o viene general, podemos autoclasi.
+          if (category === undefined && (data.category === undefined)) {
+            // no toca category aquí; solo si el usuario no envió category en el body
+          }
         }
 
         if (category !== undefined) {
-          data.category = isNonEmptyString(category)
+          let cat = isNonEmptyString(category)
             ? category.trim().slice(0, 80)
             : "General";
+
+          if (!isNonEmptyString(cat) || cat === "General") {
+            const baseConcept = data.concept ?? concept;
+            const auto = classifyCategoryByConcept(baseConcept);
+            if (auto) cat = auto;
+          }
+          data.category = cat;
         }
 
         if (type !== undefined) {
@@ -1217,14 +944,12 @@ export default function farmsRouter(prisma) {
           data.date = finalDate;
         }
 
-        if (note !== undefined) {
-          data.note = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
+        if (invoiceNumber !== undefined) {
+          data.invoiceNumber = parseInvoiceNumber(invoiceNumber);
         }
 
-        // ✅ nuevo: factura opcional (si no viene, no se toca)
-        const finalInvoiceNumber = cleanInvoiceNumber(invoiceNumber);
-        if (finalInvoiceNumber !== undefined) {
-          data.invoiceNumber = finalInvoiceNumber; // string o null
+        if (note !== undefined) {
+          data.note = isNonEmptyString(note) ? note.trim().slice(0, 240) : null;
         }
 
         const movement = await prisma.financeMovement.update({
@@ -1238,8 +963,8 @@ export default function farmsRouter(prisma) {
             category: true,
             type: true,
             amount: true,
+            invoiceNumber: true,
             note: true,
-            invoiceNumber: true, // ✅ nuevo
             createdAt: true,
             updatedAt: true,
           },
@@ -1284,6 +1009,342 @@ export default function farmsRouter(prisma) {
       }
     }
   );
+
+  // ==========================================================
+  // ✅ FINANCE INSIGHTS (REAL): GET /api/farms/:id/finance/insights
+  // ==========================================================
+  router.get("/farms/:id/finance/insights", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId)) {
+        return res.status(400).json({ error: "farmId inválido." });
+      }
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) {
+        return res.status(403).json({ error: "Sin acceso a esa finca." });
+      }
+
+      const now = new Date();
+      const y = now.getUTCFullYear();
+      const m0 = now.getUTCMonth();
+
+      const startThisMonth = startOfUTCMonth(y, m0);
+      const startPrevMonth = startOfUTCMonth(y, m0 - 1);
+      const endThisMonth = endOfUTCMonth(y, m0);
+
+      // últimos 3 meses para proyección
+      const start3Months = startOfUTCMonth(y, m0 - 2);
+
+      // Para detectar “categoría nueva”: histórico anterior al mes actual
+      const olderThanThisMonth = startThisMonth;
+
+      const [movThisMonth, movPrevMonth, movLast3, movOlder] = await Promise.all([
+        prisma.financeMovement.findMany({
+          where: { farmId, date: { gte: startThisMonth, lt: endThisMonth } },
+          orderBy: [{ date: "desc" }, { createdAt: "desc" }],
+          select: {
+            id: true,
+            date: true,
+            concept: true,
+            category: true,
+            type: true,
+            amount: true,
+            invoiceNumber: true,
+            note: true,
+            createdAt: true,
+          },
+        }),
+        prisma.financeMovement.findMany({
+          where: { farmId, date: { gte: startPrevMonth, lt: startThisMonth } },
+          select: { id: true, date: true, concept: true, category: true, type: true, amount: true },
+        }),
+        prisma.financeMovement.findMany({
+          where: { farmId, date: { gte: start3Months, lt: endThisMonth } },
+          select: { id: true, date: true, category: true, type: true, amount: true },
+        }),
+        prisma.financeMovement.findMany({
+          where: { farmId, date: { lt: olderThanThisMonth } },
+          select: { id: true, category: true },
+        }),
+      ]);
+
+      function sumByType(list) {
+        let ingresos = 0;
+        let gastos = 0;
+        for (const mv of list) {
+          const a = Number(mv.amount || 0);
+          if (mv.type === "Ingreso") ingresos += a;
+          else if (mv.type === "Gasto") gastos += a;
+        }
+        const balance = ingresos - gastos;
+        const margin = ingresos > 0 ? (balance / ingresos) * 100 : 0;
+        return { ingresos, gastos, balance, margin };
+      }
+
+      const sThis = sumByType(movThisMonth);
+      const sPrev = sumByType(movPrevMonth);
+
+      const variation = {
+        ingresos: sPrev.ingresos > 0 ? ((sThis.ingresos - sPrev.ingresos) / sPrev.ingresos) * 100 : (sThis.ingresos > 0 ? 100 : 0),
+        gastos: sPrev.gastos > 0 ? ((sThis.gastos - sPrev.gastos) / sPrev.gastos) * 100 : (sThis.gastos > 0 ? 100 : 0),
+        balance: sPrev.balance !== 0 ? ((sThis.balance - sPrev.balance) / Math.abs(sPrev.balance)) * 100 : (sThis.balance !== 0 ? 100 : 0),
+      };
+
+      // Top categorías del mes (por monto absoluto)
+      const catMap = new Map();
+      for (const mv of movThisMonth) {
+        const cat = (mv.category || "General").trim() || "General";
+        const prev = catMap.get(cat) || { category: cat, total: 0 };
+        prev.total += Number(mv.amount || 0);
+        catMap.set(cat, prev);
+      }
+      const topCategories = Array.from(catMap.values())
+        .sort((a, b) => b.total - a.total)
+        .slice(0, 3);
+
+      // Anomalías
+      const anomalies = [];
+
+      // 1) Duplicado exacto: fecha(YYYY-MM-DD)+monto+concepto
+      const seenDup = new Set();
+      const dupHits = new Set();
+      for (const mv of movThisMonth) {
+        const key = `${toYYYYMMDD(mv.date)}|${Number(mv.amount || 0)}|${String(mv.concept || "").trim().toLowerCase()}`;
+        if (seenDup.has(key)) dupHits.add(key);
+        else seenDup.add(key);
+      }
+      if (dupHits.size > 0) {
+        anomalies.push({
+          code: "DUPLICATE_EXACT",
+          level: "warning",
+          title: "Posibles duplicados",
+          message: `Se detectaron ${dupHits.size} posible(s) duplicado(s) exacto(s).`,
+          count: dupHits.size,
+        });
+      }
+
+      // 2) > 2.5x promedio por categoría (en el mes)
+      const byCat = new Map();
+      for (const mv of movThisMonth) {
+        const cat = (mv.category || "General").trim() || "General";
+        const arr = byCat.get(cat) || [];
+        arr.push(mv);
+        byCat.set(cat, arr);
+      }
+
+      for (const [cat, arr] of byCat.entries()) {
+        if (arr.length < 3) continue; // no inventamos anomalías con 1-2 datos
+        const avg = arr.reduce((s, x) => s + Number(x.amount || 0), 0) / arr.length;
+        const threshold = avg * 2.5;
+
+        const big = arr.filter((x) => Number(x.amount || 0) > threshold);
+        if (big.length > 0) {
+          anomalies.push({
+            code: "CATEGORY_OUTLIER",
+            level: "warning",
+            title: "Monto inusual por categoría",
+            message: `En "${cat}" hay ${big.length} movimiento(s) muy por encima del promedio.`,
+            category: cat,
+            count: big.length,
+          });
+        }
+      }
+
+      // 3) Categoría nueva nunca usada (comparado contra histórico anterior)
+      const olderCats = new Set(movOlder.map((x) => (x.category || "General").trim() || "General"));
+      const newCats = new Set();
+      for (const mv of movThisMonth) {
+        const cat = (mv.category || "General").trim() || "General";
+        if (!olderCats.has(cat)) newCats.add(cat);
+      }
+      if (newCats.size > 0) {
+        anomalies.push({
+          code: "NEW_CATEGORY",
+          level: "info",
+          title: "Categorías nuevas",
+          message: `Aparecieron ${newCats.size} categoría(s) que no se habían usado antes.`,
+          categories: Array.from(newCats).slice(0, 6),
+        });
+      }
+
+      // Score salud financiera (0-100)
+      const generalCount = movThisMonth.filter((mvv) => (mvv.category || "").trim() === "" || (mvv.category || "").trim() === "General").length;
+      const uncategorizedCount = movThisMonth.filter((mvv) => !isNonEmptyString(mvv.category)).length;
+
+      let score = 50;
+      // margen
+      if (sThis.margin > 0) score += Math.min(25, sThis.margin * 0.5);
+      else score -= Math.min(25, Math.abs(sThis.margin) * 0.5);
+
+      // crecimiento balance vs mes anterior
+      if (sPrev.balance !== 0) {
+        const growth = (sThis.balance - sPrev.balance) / Math.abs(sPrev.balance);
+        score += Math.max(-15, Math.min(15, growth * 15));
+      }
+
+      // penalizaciones por mala calidad de datos
+      score -= Math.min(20, generalCount * 2);
+      score -= Math.min(10, uncategorizedCount * 3);
+
+      score = Math.max(0, Math.min(100, Math.round(score)));
+
+      // Proyección 30/90 (promedio neto mensual últimos 3 meses)
+      const byMonth = new Map();
+      for (const mv of movLast3) {
+        const mk = monthKeyUTC(mv.date);
+        if (!mk) continue;
+        const prev = byMonth.get(mk) || { ingresos: 0, gastos: 0, neto: 0 };
+        const a = Number(mv.amount || 0);
+        if (mv.type === "Ingreso") prev.ingresos += a;
+        else if (mv.type === "Gasto") prev.gastos += a;
+        prev.neto = prev.ingresos - prev.gastos;
+        byMonth.set(mk, prev);
+      }
+      const months = Array.from(byMonth.keys()).sort();
+      const last3 = months.slice(-3);
+      const avgNet =
+        last3.length > 0
+          ? last3.reduce((acc, mk) => acc + (byMonth.get(mk)?.neto || 0), 0) / last3.length
+          : 0;
+
+      const projection30 = Math.round(avgNet);
+      const projection90 = Math.round(avgNet * 3);
+
+      // Auditor de datos
+      const genericConcept = (c) => {
+        const t = String(c || "").trim().toLowerCase();
+        if (!t) return true;
+        if (t.length <= 5) return true;
+        return ["varios", "general", "misc", "otros"].some((x) => t === x);
+      };
+
+      const audit = {
+        missingCategory: uncategorizedCount,
+        tooGeneralCategory: generalCount,
+        genericConcept: movThisMonth.filter((mvv) => genericConcept(mvv.concept)).length,
+        possibleDuplicates: dupHits.size,
+        invoiceMissing: movThisMonth.filter((mvv) => mvv.type === "Gasto" && !isNonEmptyString(mvv.invoiceNumber)).length,
+      };
+
+      // Sugerencias finanzas → tareas (basadas en categorías del mes)
+      const sug = [];
+      const todayStr = toYYYYMMDD(new Date(Date.UTC(y, m0, now.getUTCDate(), 12, 0, 0)));
+
+      const catTotals = Array.from(catMap.values()).sort((a, b) => b.total - a.total);
+      const top = catTotals[0]?.category || "";
+
+      const addSuggestion = (id, title, message, payload) => {
+        sug.push({
+          id,
+          title,
+          message,
+          actionPayload: payload,
+        });
+      };
+
+      // Reglas simples (producción, sin fantasía)
+      const transportTotal = (catMap.get("Transporte")?.total || 0);
+      const feedTotal = (catMap.get("Alimentación")?.total || 0);
+      const fertTotal = (catMap.get("Fertilizantes")?.total || 0);
+
+      if (transportTotal > 0) {
+        addSuggestion(
+          "FIN_TRANSPORT_OPT",
+          "Optimizar rutas y combustible",
+          `Gasto relevante en Transporte este mes.`,
+          {
+            title: "Optimizar rutas y consumo de combustible",
+            zone: "",
+            type: "Operación",
+            priority: "Media",
+            start: todayStr,
+            due: todayStr,
+            status: "Pendiente",
+            owner: "",
+          }
+        );
+      }
+
+      if (feedTotal > 0) {
+        addSuggestion(
+          "FIN_FEED_EFF",
+          "Revisar eficiencia de alimentación",
+          `Hay gasto en Alimentación este mes. Revisá consumo vs rendimiento.`,
+          {
+            title: "Revisar eficiencia de alimentación",
+            zone: "",
+            type: "Alimentación",
+            priority: "Media",
+            start: todayStr,
+            due: todayStr,
+            status: "Pendiente",
+            owner: "",
+          }
+        );
+      }
+
+      if (fertTotal > 0) {
+        addSuggestion(
+          "FIN_FERT_PLAN",
+          "Planificar fertilización",
+          `Movimiento(s) en Fertilizantes este mes. Alineá compras con calendario técnico.`,
+          {
+            title: "Planificar fertilización según calendario",
+            zone: "",
+            type: "Mantenimiento",
+            priority: "Media",
+            start: todayStr,
+            due: todayStr,
+            status: "Pendiente",
+            owner: "",
+          }
+        );
+      }
+
+      // fallback suave si no hay nada útil
+      if (sug.length === 0 && top) {
+        addSuggestion(
+          "FIN_REVIEW_TOPCAT",
+          "Revisar principal categoría",
+          `La categoría con mayor movimiento es "${top}". Revisá si está optimizada.`,
+          {
+            title: `Revisión financiera de categoría: ${top}`,
+            zone: "",
+            type: "Finanzas",
+            priority: "Media",
+            start: todayStr,
+            due: todayStr,
+            status: "Pendiente",
+            owner: "",
+          }
+        );
+      }
+
+      return res.json({
+        summary: {
+          month: monthKeyUTC(now),
+          ingresos: sThis.ingresos,
+          gastos: sThis.gastos,
+          balance: sThis.balance,
+          margen: Number(sThis.margin.toFixed(2)),
+          variation,
+        },
+        topCategories,
+        anomalies,
+        healthScore: score,
+        projection30,
+        projection90,
+        audit,
+        suggestions: sug,
+      });
+    } catch (err) {
+      console.error("GET_FINANCE_INSIGHTS_ERROR:", err);
+      return res.status(500).json({ error: "Error generando insights." });
+    }
+  });
 
   return router;
 }
