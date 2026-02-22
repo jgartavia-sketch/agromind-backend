@@ -429,7 +429,7 @@ export default function farmsRouter(prisma) {
         },
       });
 
-      // ✅ Ahora sí: zonas + components
+      // ✅ zonas + components
       const zones = await prisma.mapZone.findMany({
         where: { farmId },
         select: { name: true, components: true },
@@ -490,7 +490,6 @@ export default function farmsRouter(prisma) {
         if (Array.isArray(x)) return x;
         if (typeof x === "string") return [x];
         if (typeof x === "object") {
-          // si es objeto tipo { "maiz": true, "cafe": 2 }
           const out = [];
           for (const [k, v] of Object.entries(x)) {
             if (!k) continue;
@@ -506,31 +505,41 @@ export default function farmsRouter(prisma) {
         return [];
       }
 
+      // ✅ FIX CLAVE: escoger el primer arreglo NO VACÍO (no usar || con arrays)
+      function firstNonEmptyList(...candidates) {
+        for (const cand of candidates) {
+          const arr = listFromUnknown(cand);
+          if (Array.isArray(arr) && arr.length > 0) return arr;
+        }
+        return [];
+      }
+
       function extractComponents(components) {
         const c = components && typeof components === "object" ? components : {};
 
-        const crops =
-          listFromUnknown(c.cultivos) ||
-          listFromUnknown(c.cultivo) ||
-          listFromUnknown(c.crops) ||
-          listFromUnknown(c.crop) ||
-          [];
+        const crops = firstNonEmptyList(
+          c.cultivos,
+          c.cultivo,
+          c.crops,
+          c.crop,
+          c.plantas,
+          c.planta
+        );
 
-        const animals =
-          listFromUnknown(c.animales) ||
-          listFromUnknown(c.animal) ||
-          listFromUnknown(c.animals) ||
-          listFromUnknown(c.animalList) ||
-          [];
+        const animals = firstNonEmptyList(
+          c.animales,
+          c.animal,
+          c.animals,
+          c.animalList,
+          c.ganado
+        );
 
-        // fallback: si el objeto tiene llaves sueltas como "maiz":true, "gallinas":true
-        // y no se detectó crops/animals, las tratamos como "otros" para al menos sugerir inspección.
+        // fallback: llaves sueltas y no se detectó crops/animals
         let other = [];
-        if ((!crops || crops.length === 0) && (!animals || animals.length === 0)) {
+        if (crops.length === 0 && animals.length === 0) {
           other = listFromUnknown(c);
         }
 
-        // limpiar y normalizar strings
         const cleanArr = (arr) =>
           (Array.isArray(arr) ? arr : [])
             .map((x) => String(x || "").trim())
@@ -545,7 +554,7 @@ export default function farmsRouter(prisma) {
       }
 
       // ==========================================================
-      // 0) Sugerencias guiadas por COMPONENTS (cultivo/animales)
+      // 0) Sugerencias guiadas por COMPONENTS
       // ==========================================================
       const zoneNames = zones
         .map((z) => (isNonEmptyString(z?.name) ? z.name.trim() : ""))
@@ -559,11 +568,9 @@ export default function farmsRouter(prisma) {
 
         const { crops, animals, other } = extractComponents(z.components);
 
-        // Cultivos → sugerencias típicas
+        // Cultivos
         for (const crop of crops) {
-          if (hasSimilarActiveTask(zoneName, ["abonar", "fertiliz", crop])) {
-            // ya hay algo parecido, no spameamos
-          } else {
+          if (!hasSimilarActiveTask(zoneName, ["abonar", "fertiliz", crop])) {
             pushSuggestion({
               id: `crop_${zoneName}_${crop}`.slice(0, 180),
               code: "ZONE_COMPONENT_CROP",
@@ -582,32 +589,31 @@ export default function farmsRouter(prisma) {
                 owner: "",
               },
             });
+          }
 
-            // una segunda sugerencia “de operación” (si no existe algo parecido)
-            if (!hasSimilarActiveTask(zoneName, ["poda", "podar", crop])) {
-              pushSuggestion({
-                id: `prune_${zoneName}_${crop}`.slice(0, 180),
-                code: "ZONE_COMPONENT_CROP_PRUNE",
-                level: "info",
-                title: "Mantenimiento del cultivo",
-                message: `Zona "${zoneName}": considerar poda/limpieza y control de malezas para (${crop}).`,
+          if (!hasSimilarActiveTask(zoneName, ["poda", "podar", crop])) {
+            pushSuggestion({
+              id: `prune_${zoneName}_${crop}`.slice(0, 180),
+              code: "ZONE_COMPONENT_CROP_PRUNE",
+              level: "info",
+              title: "Mantenimiento del cultivo",
+              message: `Zona "${zoneName}": considerar poda/limpieza y control de malezas para (${crop}).`,
+              zone: zoneName,
+              actionPayload: {
+                title: `Poda/limpieza (${crop})`,
                 zone: zoneName,
-                actionPayload: {
-                  title: `Poda/limpieza (${crop})`,
-                  zone: zoneName,
-                  type: "Mantenimiento",
-                  priority: "Media",
-                  start: todayStr,
-                  due: todayStr,
-                  status: "Pendiente",
-                  owner: "",
-                },
-              });
-            }
+                type: "Mantenimiento",
+                priority: "Media",
+                start: todayStr,
+                due: todayStr,
+                status: "Pendiente",
+                owner: "",
+              },
+            });
           }
         }
 
-        // Animales → sugerencias típicas
+        // Animales
         for (const animal of animals) {
           if (!hasSimilarActiveTask(zoneName, ["aliment", "agua", animal])) {
             pushSuggestion({
@@ -651,7 +657,15 @@ export default function farmsRouter(prisma) {
             });
           }
 
-          if (!hasSimilarActiveTask(zoneName, ["revision sanitaria", "sanidad", "vacun", "desparas", animal])) {
+          if (
+            !hasSimilarActiveTask(zoneName, [
+              "revision sanitaria",
+              "sanidad",
+              "vacun",
+              "desparas",
+              animal,
+            ])
+          ) {
             pushSuggestion({
               id: `animal_health_${zoneName}_${animal}`.slice(0, 180),
               code: "ZONE_COMPONENT_ANIMAL_HEALTH",
@@ -673,8 +687,8 @@ export default function farmsRouter(prisma) {
           }
         }
 
-        // “Otros” componentes → inspección genérica (sin inventar)
-        if ((crops.length === 0 && animals.length === 0) && other.length > 0) {
+        // Otros → inspección genérica
+        if (crops.length === 0 && animals.length === 0 && other.length > 0) {
           if (!hasSimilarActiveTask(zoneName, ["inspeccion", "inspección", "revision", "revisión"])) {
             pushSuggestion({
               id: `zone_other_${zoneName}`.slice(0, 180),
@@ -737,7 +751,7 @@ export default function farmsRouter(prisma) {
       }
 
       // ==========================================================
-      // 2) Regla: zonas sin tareas activas (Pendiente/En progreso)
+      // 2) Regla: zonas sin tareas activas
       // ==========================================================
       for (const zn of zoneNames) {
         const hasActive = tasks.some(
@@ -782,7 +796,7 @@ export default function farmsRouter(prisma) {
       }
 
       // ==========================================================
-      // 4) Regla: atrasadas (due < hoy y no completadas)
+      // 4) Regla: atrasadas
       // ==========================================================
       for (const t of tasks) {
         if (!t?.due || !t?.title) continue;
