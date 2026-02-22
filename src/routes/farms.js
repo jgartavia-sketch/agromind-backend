@@ -429,9 +429,10 @@ export default function farmsRouter(prisma) {
         },
       });
 
+      // ✅ Ahora sí: zonas + components
       const zones = await prisma.mapZone.findMany({
         where: { farmId },
-        select: { name: true },
+        select: { name: true, components: true },
       });
 
       // Helpers tiempo
@@ -452,13 +453,254 @@ export default function farmsRouter(prisma) {
       const seen = new Set(); // evitar duplicados exactos
 
       function pushSuggestion(s) {
-        const key = `${s.code}:${s.zone || ""}:${s.title || ""}:${s.due || ""}`;
+        const key = `${s.code}:${s.zone || ""}:${s.title || ""}:${s.due || ""}:${s.message || ""}`;
         if (seen.has(key)) return;
         seen.add(key);
         suggestions.push(s);
       }
 
-      // Regla 1: vencen pronto (<= 2 días)
+      function normText(s) {
+        return String(s || "")
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .trim();
+      }
+
+      function hasSimilarActiveTask(zoneName, keywords = []) {
+        const zn = normText(zoneName);
+        const keys = keywords.map(normText).filter(Boolean);
+
+        return tasks.some((t) => {
+          if (!t || t.status === "Completada") return false;
+          const tZone = normText(t.zone || "");
+          if (zn && tZone !== zn) return false;
+
+          const hay = normText(`${t.title || ""} ${t.type || ""}`);
+          if (keys.length === 0) return false;
+          return keys.some((k) => k && hay.includes(k));
+        });
+      }
+
+      // -------------------------
+      // COMPONENTS PARSER (tolerante)
+      // -------------------------
+      function listFromUnknown(x) {
+        if (!x) return [];
+        if (Array.isArray(x)) return x;
+        if (typeof x === "string") return [x];
+        if (typeof x === "object") {
+          // si es objeto tipo { "maiz": true, "cafe": 2 }
+          const out = [];
+          for (const [k, v] of Object.entries(x)) {
+            if (!k) continue;
+            if (v === true) out.push(k);
+            else if (typeof v === "number" && v > 0) out.push(`${k} (${v})`);
+            else if (typeof v === "string" && v.trim()) out.push(v.trim());
+            else if (v && typeof v === "object" && (v.name || v.tipo)) {
+              out.push(String(v.name || v.tipo || k));
+            }
+          }
+          return out;
+        }
+        return [];
+      }
+
+      function extractComponents(components) {
+        const c = components && typeof components === "object" ? components : {};
+
+        const crops =
+          listFromUnknown(c.cultivos) ||
+          listFromUnknown(c.cultivo) ||
+          listFromUnknown(c.crops) ||
+          listFromUnknown(c.crop) ||
+          [];
+
+        const animals =
+          listFromUnknown(c.animales) ||
+          listFromUnknown(c.animal) ||
+          listFromUnknown(c.animals) ||
+          listFromUnknown(c.animalList) ||
+          [];
+
+        // fallback: si el objeto tiene llaves sueltas como "maiz":true, "gallinas":true
+        // y no se detectó crops/animals, las tratamos como "otros" para al menos sugerir inspección.
+        let other = [];
+        if ((!crops || crops.length === 0) && (!animals || animals.length === 0)) {
+          other = listFromUnknown(c);
+        }
+
+        // limpiar y normalizar strings
+        const cleanArr = (arr) =>
+          (Array.isArray(arr) ? arr : [])
+            .map((x) => String(x || "").trim())
+            .filter(Boolean)
+            .slice(0, 12);
+
+        return {
+          crops: cleanArr(crops),
+          animals: cleanArr(animals),
+          other: cleanArr(other),
+        };
+      }
+
+      // ==========================================================
+      // 0) Sugerencias guiadas por COMPONENTS (cultivo/animales)
+      // ==========================================================
+      const zoneNames = zones
+        .map((z) => (isNonEmptyString(z?.name) ? z.name.trim() : ""))
+        .filter(Boolean);
+
+      const todayStr = toYYYYMMDD(todayUtcNoon);
+
+      for (const z of zones) {
+        const zoneName = isNonEmptyString(z?.name) ? z.name.trim() : "";
+        if (!zoneName) continue;
+
+        const { crops, animals, other } = extractComponents(z.components);
+
+        // Cultivos → sugerencias típicas
+        for (const crop of crops) {
+          if (hasSimilarActiveTask(zoneName, ["abonar", "fertiliz", crop])) {
+            // ya hay algo parecido, no spameamos
+          } else {
+            pushSuggestion({
+              id: `crop_${zoneName}_${crop}`.slice(0, 180),
+              code: "ZONE_COMPONENT_CROP",
+              level: "info",
+              title: "Acción recomendada para cultivo",
+              message: `Zona "${zoneName}": revisar y planificar labores para el cultivo (${crop}).`,
+              zone: zoneName,
+              actionPayload: {
+                title: `Revisión de cultivo (${crop})`,
+                zone: zoneName,
+                type: "Mantenimiento",
+                priority: "Media",
+                start: todayStr,
+                due: todayStr,
+                status: "Pendiente",
+                owner: "",
+              },
+            });
+
+            // una segunda sugerencia “de operación” (si no existe algo parecido)
+            if (!hasSimilarActiveTask(zoneName, ["poda", "podar", crop])) {
+              pushSuggestion({
+                id: `prune_${zoneName}_${crop}`.slice(0, 180),
+                code: "ZONE_COMPONENT_CROP_PRUNE",
+                level: "info",
+                title: "Mantenimiento del cultivo",
+                message: `Zona "${zoneName}": considerar poda/limpieza y control de malezas para (${crop}).`,
+                zone: zoneName,
+                actionPayload: {
+                  title: `Poda/limpieza (${crop})`,
+                  zone: zoneName,
+                  type: "Mantenimiento",
+                  priority: "Media",
+                  start: todayStr,
+                  due: todayStr,
+                  status: "Pendiente",
+                  owner: "",
+                },
+              });
+            }
+          }
+        }
+
+        // Animales → sugerencias típicas
+        for (const animal of animals) {
+          if (!hasSimilarActiveTask(zoneName, ["aliment", "agua", animal])) {
+            pushSuggestion({
+              id: `animal_feed_${zoneName}_${animal}`.slice(0, 180),
+              code: "ZONE_COMPONENT_ANIMAL_FEED",
+              level: "info",
+              title: "Rutina de animales",
+              message: `Zona "${zoneName}": revisar agua y alimentación para (${animal}).`,
+              zone: zoneName,
+              actionPayload: {
+                title: `Revisar agua/alimento (${animal})`,
+                zone: zoneName,
+                type: "Alimentación",
+                priority: "Media",
+                start: todayStr,
+                due: todayStr,
+                status: "Pendiente",
+                owner: "",
+              },
+            });
+          }
+
+          if (!hasSimilarActiveTask(zoneName, ["limpieza", "higiene", "corral", animal])) {
+            pushSuggestion({
+              id: `animal_clean_${zoneName}_${animal}`.slice(0, 180),
+              code: "ZONE_COMPONENT_ANIMAL_CLEAN",
+              level: "info",
+              title: "Orden y limpieza",
+              message: `Zona "${zoneName}": planificar limpieza/orden del área para (${animal}).`,
+              zone: zoneName,
+              actionPayload: {
+                title: `Limpieza del área (${animal})`,
+                zone: zoneName,
+                type: "Mantenimiento",
+                priority: "Media",
+                start: todayStr,
+                due: todayStr,
+                status: "Pendiente",
+                owner: "",
+              },
+            });
+          }
+
+          if (!hasSimilarActiveTask(zoneName, ["revision sanitaria", "sanidad", "vacun", "desparas", animal])) {
+            pushSuggestion({
+              id: `animal_health_${zoneName}_${animal}`.slice(0, 180),
+              code: "ZONE_COMPONENT_ANIMAL_HEALTH",
+              level: "info",
+              title: "Chequeo sanitario",
+              message: `Zona "${zoneName}": revisar plan sanitario (ej. vacunas/desparasitación) para (${animal}) según tu calendario.`,
+              zone: zoneName,
+              actionPayload: {
+                title: `Chequeo sanitario (${animal})`,
+                zone: zoneName,
+                type: "Mantenimiento",
+                priority: "Media",
+                start: todayStr,
+                due: todayStr,
+                status: "Pendiente",
+                owner: "",
+              },
+            });
+          }
+        }
+
+        // “Otros” componentes → inspección genérica (sin inventar)
+        if ((crops.length === 0 && animals.length === 0) && other.length > 0) {
+          if (!hasSimilarActiveTask(zoneName, ["inspeccion", "inspección", "revision", "revisión"])) {
+            pushSuggestion({
+              id: `zone_other_${zoneName}`.slice(0, 180),
+              code: "ZONE_COMPONENT_OTHER",
+              level: "info",
+              title: "Inspección por componentes",
+              message: `Zona "${zoneName}": hay componentes registrados. Recomendación: inspección preventiva y actualización de tareas.`,
+              zone: zoneName,
+              actionPayload: {
+                title: `Inspección preventiva (${zoneName})`,
+                zone: zoneName,
+                type: "Mantenimiento",
+                priority: "Media",
+                start: todayStr,
+                due: todayStr,
+                status: "Pendiente",
+                owner: "",
+              },
+            });
+          }
+        }
+      }
+
+      // ==========================================================
+      // 1) Regla: vencen pronto (<= 2 días)
+      // ==========================================================
       for (const t of tasks) {
         if (!t?.due || !t?.title) continue;
         if (t.status === "Completada") continue;
@@ -480,7 +722,6 @@ export default function farmsRouter(prisma) {
                 ? `La tarea "${t.title}" vence hoy.`
                 : `La tarea "${t.title}" vence en ${diffDays} día(s).`,
             zone: t.zone || null,
-            // Payload listo para “Agregar como tarea” (prefill)
             actionPayload: {
               title: `Seguimiento: ${t.title}`,
               zone: t.zone || "",
@@ -495,17 +736,14 @@ export default function farmsRouter(prisma) {
         }
       }
 
-      // Regla 2: zonas sin tareas activas (Pendiente/En progreso)
-      const zoneNames = zones
-        .map((z) => (isNonEmptyString(z?.name) ? z.name.trim() : ""))
-        .filter(Boolean);
-
+      // ==========================================================
+      // 2) Regla: zonas sin tareas activas (Pendiente/En progreso)
+      // ==========================================================
       for (const zn of zoneNames) {
         const hasActive = tasks.some(
           (t) => (t.zone || "").trim() === zn && t.status !== "Completada"
         );
         if (!hasActive) {
-          const d = toYYYYMMDD(todayUtcNoon);
           pushSuggestion({
             id: `zone_empty_${zn}`,
             code: "ZONE_NO_ACTIVE_TASKS",
@@ -518,8 +756,8 @@ export default function farmsRouter(prisma) {
               zone: zn,
               type: "Mantenimiento",
               priority: "Media",
-              start: d,
-              due: d,
+              start: todayStr,
+              due: todayStr,
               status: "Pendiente",
               owner: "",
             },
@@ -527,7 +765,9 @@ export default function farmsRouter(prisma) {
         }
       }
 
-      // Regla 3: demasiadas pendientes (>= 5)
+      // ==========================================================
+      // 3) Regla: demasiadas pendientes (>= 5)
+      // ==========================================================
       const pendingCount = tasks.filter((t) => t.status === "Pendiente").length;
       if (pendingCount >= 5) {
         pushSuggestion({
@@ -537,11 +777,13 @@ export default function farmsRouter(prisma) {
           title: "Carga alta de pendientes",
           message: `Tenés ${pendingCount} tareas en estado "Pendiente". Considerá priorizar o dividir trabajo.`,
           zone: null,
-          actionPayload: null, // esta es solo “insight”
+          actionPayload: null,
         });
       }
 
-      // Regla 4: atrasadas (due < hoy y no completadas)
+      // ==========================================================
+      // 4) Regla: atrasadas (due < hoy y no completadas)
+      // ==========================================================
       for (const t of tasks) {
         if (!t?.due || !t?.title) continue;
         if (t.status === "Completada") continue;
