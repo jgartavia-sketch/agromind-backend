@@ -90,6 +90,13 @@ function normalizeType(v) {
   return null;
 }
 
+function toYYYYMMDD(value) {
+  if (!value) return "";
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
+}
+
 export default function farmsRouter(prisma) {
   const router = express.Router();
 
@@ -390,6 +397,186 @@ export default function farmsRouter(prisma) {
     } catch (err) {
       console.error("GET_TASKS_ERROR:", err);
       return res.status(500).json({ error: "Error interno listando tareas." });
+    }
+  });
+
+  // ✅ IA INTERNA: Sugerencias de tareas
+  // GET /api/farms/:id/tasks/suggestions
+  router.get("/farms/:id/tasks/suggestions", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+
+      if (!looksLikeId(farmId))
+        return res.status(400).json({ error: "farmId inválido." });
+
+      const farm = await assertFarmOwner(farmId, userId);
+      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+      const tasks = await prisma.task.findMany({
+        where: { farmId },
+        select: {
+          id: true,
+          title: true,
+          zone: true,
+          type: true,
+          priority: true,
+          status: true,
+          start: true,
+          due: true,
+          owner: true,
+          createdAt: true,
+        },
+      });
+
+      const zones = await prisma.mapZone.findMany({
+        where: { farmId },
+        select: { name: true },
+      });
+
+      // Helpers tiempo
+      const MS_DAY = 1000 * 60 * 60 * 24;
+      const now = new Date();
+      const todayUtcNoon = new Date(
+        Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate(),
+          12,
+          0,
+          0
+        )
+      );
+
+      const suggestions = [];
+      const seen = new Set(); // evitar duplicados exactos
+
+      function pushSuggestion(s) {
+        const key = `${s.code}:${s.zone || ""}:${s.title || ""}:${s.due || ""}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        suggestions.push(s);
+      }
+
+      // Regla 1: vencen pronto (<= 2 días)
+      for (const t of tasks) {
+        if (!t?.due || !t?.title) continue;
+        if (t.status === "Completada") continue;
+
+        const dueDate = new Date(t.due);
+        const diffDays = Math.ceil((dueDate.getTime() - todayUtcNoon.getTime()) / MS_DAY);
+
+        if (diffDays >= 0 && diffDays <= 2) {
+          const dueStr = toYYYYMMDD(dueDate);
+          const startStr = toYYYYMMDD(t.start || dueDate);
+
+          pushSuggestion({
+            id: `due_soon_${t.id}`,
+            code: "DUE_SOON",
+            level: diffDays === 0 ? "alert" : "warning",
+            title: diffDays === 0 ? "Vence hoy" : "Vence pronto",
+            message:
+              diffDays === 0
+                ? `La tarea "${t.title}" vence hoy.`
+                : `La tarea "${t.title}" vence en ${diffDays} día(s).`,
+            zone: t.zone || null,
+            // Payload listo para “Agregar como tarea” (prefill)
+            actionPayload: {
+              title: `Seguimiento: ${t.title}`,
+              zone: t.zone || "",
+              type: t.type || "Mantenimiento",
+              priority: "Alta",
+              start: startStr,
+              due: dueStr,
+              status: "Pendiente",
+              owner: t.owner || "",
+            },
+          });
+        }
+      }
+
+      // Regla 2: zonas sin tareas activas (Pendiente/En progreso)
+      const zoneNames = zones
+        .map((z) => (isNonEmptyString(z?.name) ? z.name.trim() : ""))
+        .filter(Boolean);
+
+      for (const zn of zoneNames) {
+        const hasActive = tasks.some(
+          (t) => (t.zone || "").trim() === zn && t.status !== "Completada"
+        );
+        if (!hasActive) {
+          const d = toYYYYMMDD(todayUtcNoon);
+          pushSuggestion({
+            id: `zone_empty_${zn}`,
+            code: "ZONE_NO_ACTIVE_TASKS",
+            level: "info",
+            title: "Zona sin tareas activas",
+            message: `La zona "${zn}" no tiene tareas activas.`,
+            zone: zn,
+            actionPayload: {
+              title: `Inspección preventiva - ${zn}`,
+              zone: zn,
+              type: "Mantenimiento",
+              priority: "Media",
+              start: d,
+              due: d,
+              status: "Pendiente",
+              owner: "",
+            },
+          });
+        }
+      }
+
+      // Regla 3: demasiadas pendientes (>= 5)
+      const pendingCount = tasks.filter((t) => t.status === "Pendiente").length;
+      if (pendingCount >= 5) {
+        pushSuggestion({
+          id: `too_many_pending_${pendingCount}`,
+          code: "TOO_MANY_PENDING",
+          level: "warning",
+          title: "Carga alta de pendientes",
+          message: `Tenés ${pendingCount} tareas en estado "Pendiente". Considerá priorizar o dividir trabajo.`,
+          zone: null,
+          actionPayload: null, // esta es solo “insight”
+        });
+      }
+
+      // Regla 4: atrasadas (due < hoy y no completadas)
+      for (const t of tasks) {
+        if (!t?.due || !t?.title) continue;
+        if (t.status === "Completada") continue;
+
+        const dueDate = new Date(t.due);
+        const diffDays = Math.floor((todayUtcNoon.getTime() - dueDate.getTime()) / MS_DAY);
+        if (diffDays >= 1) {
+          const dueStr = toYYYYMMDD(dueDate);
+          const startStr = toYYYYMMDD(t.start || dueDate);
+
+          pushSuggestion({
+            id: `overdue_${t.id}`,
+            code: "OVERDUE",
+            level: "alert",
+            title: "Tarea atrasada",
+            message: `La tarea "${t.title}" está atrasada por ${diffDays} día(s).`,
+            zone: t.zone || null,
+            actionPayload: {
+              title: `Reprogramar: ${t.title}`,
+              zone: t.zone || "",
+              type: t.type || "Mantenimiento",
+              priority: "Alta",
+              start: startStr,
+              due: toYYYYMMDD(todayUtcNoon),
+              status: "Pendiente",
+              owner: t.owner || "",
+            },
+          });
+        }
+      }
+
+      return res.json({ suggestions });
+    } catch (err) {
+      console.error("TASK_SUGGESTIONS_ERROR:", err);
+      return res.status(500).json({ error: "Error generando sugerencias." });
     }
   });
 
