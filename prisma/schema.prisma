@@ -39,6 +39,9 @@ model Farm {
   // ✅ PASO 2: Activos (debajo de Finanzas)
   assets Asset[]
 
+  // ✅ FIX: relación inversa requerida por Prisma
+  financeAssets FinanceAsset[]
+
   @@unique([userId, name])
   @@index([userId])
   @@index([userId, isPrimary])
@@ -166,13 +169,14 @@ model Asset {
   @@index([farmId, purchaseDate])
   @@index([farmId, category])
 }
+
 model FinanceAsset {
   id        String   @id @default(cuid())
   farmId    String
   name      String
   type      String   @default("Equipo") // Equipo, Infraestructura, Herramienta, Animal, Vehículo, Otro
   qty       Int      @default(1)
-  unitValue Int      @default(0)        // CRC
+  unitValue Int      @default(0) // CRC
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
