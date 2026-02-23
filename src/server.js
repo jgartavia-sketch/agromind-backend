@@ -32,26 +32,34 @@ const ALLOWED_ORIGINS = [
 const isVercelPreview = (origin = "") =>
   origin.endsWith(".vercel.app") || origin.includes(".vercel.app");
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // Requests sin Origin (Thunder/Postman/server-to-server) → permitir
-      if (!origin) return cb(null, true);
+const corsOptions = {
+  origin: (origin, cb) => {
+    // Requests sin Origin (Thunder/Postman/server-to-server) → permitir
+    if (!origin) return cb(null, true);
 
-      if (ALLOWED_ORIGINS.includes(origin) || isVercelPreview(origin)) {
-        return cb(null, true);
-      }
+    if (ALLOWED_ORIGINS.includes(origin) || isVercelPreview(origin)) {
+      return cb(null, true);
+    }
 
-      return cb(new Error(`CORS bloqueado para origin: ${origin}`));
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+    return cb(new Error(`CORS bloqueado para origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
 
-// Preflight explícito
-app.options("*", cors());
+app.use(cors(corsOptions));
+
+// Preflight explícito (con las MISMAS opciones)
+app.options("*", cors(corsOptions));
+
+// Handler de error CORS (respuesta limpia)
+app.use((err, req, res, next) => {
+  if (err && String(err.message || "").startsWith("CORS bloqueado")) {
+    return res.status(403).json({ error: err.message });
+  }
+  return next(err);
+});
 
 // =========================
 // Prisma / DB
@@ -85,7 +93,9 @@ app.get("/__routes", (req, res) => {
   const stack = app?._router?.stack || [];
   stack.forEach((layer) => {
     if (layer.route?.path) {
-      const methods = Object.keys(layer.route.methods || {}).map((m) => m.toUpperCase());
+      const methods = Object.keys(layer.route.methods || {}).map((m) =>
+        m.toUpperCase()
+      );
       routes.push({ path: layer.route.path, methods });
     }
   });
@@ -102,7 +112,7 @@ app.get("/", (req, res) => {
 // AUTH
 app.use("/auth", authRouter(prisma));
 
-// API (Mapa / Fincas)
+// API (Mapa / Fincas / Finanzas / Activos)
 app.use("/api", farmsRouter(prisma));
 
 // =========================
