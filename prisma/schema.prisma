@@ -73,18 +73,23 @@ model MapLine {
 }
 
 model MapZone {
-  id         String   @id @default(cuid())
+  id         String  @id @default(cuid())
   farmId     String
   name       String?
   data       Json
   components Json?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+
+  // ✅ NUEVO: fecha de última actualización de NOTAS (no se mezcla con updatedAt general)
+  notesUpdatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
 
   @@index([farmId])
   @@index([farmId, updatedAt])
+  @@index([farmId, notesUpdatedAt])
 }
 
 model Task {
