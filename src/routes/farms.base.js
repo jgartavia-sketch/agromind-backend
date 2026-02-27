@@ -13,9 +13,7 @@ export function requireAuth(req, res, next) {
 
     const secret = process.env.JWT_SECRET;
     if (!secret)
-      return res
-        .status(500)
-        .json({ error: "Falta JWT_SECRET en el servidor." });
+      return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
 
     const payload = jwt.verify(token, secret);
     if (!payload?.sub) return res.status(401).json({ error: "Token inválido." });
@@ -41,6 +39,16 @@ export function cleanName(v, fallback) {
 
 export function looksLikeId(v) {
   return isNonEmptyString(v) && v.trim().length >= 8;
+}
+
+function safeClientId(v) {
+  // Permitimos id del cliente/servidor, pero con límites razonables.
+  // Idealmente aquí llegará cuid() del server luego de cargar el mapa.
+  if (!isNonEmptyString(v)) return null;
+  const s = v.trim();
+  if (s.length < 8) return null;
+  if (s.length > 64) return null;
+  return s;
 }
 
 export function parseISODateOnlyToUTC(dateStr) {
@@ -118,7 +126,9 @@ export function startOfMonthUTC(date) {
 
 export function startOfNextMonthUTC(date) {
   const d = date instanceof Date ? date : new Date(date);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0));
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0)
+  );
 }
 
 export function prevMonthKey(monthYYYYMM) {
@@ -138,7 +148,6 @@ export function normalizeText(s) {
 }
 
 export function keywordCategory(concept, category) {
-  // Si ya viene categoría, la respetamos; si viene "General" tratamos de mejorar.
   const cat = isNonEmptyString(category) ? category.trim() : "General";
   const hay = normalizeText(`${concept || ""} ${cat}`);
 
@@ -190,15 +199,12 @@ export function createFarmsContext(prisma) {
     prisma,
     router,
 
-    // guards
     requireAuth,
 
-    // asserts
     assertFarmOwner,
     assertZoneOwner,
     assertAssetOwner,
 
-    // helpers
     isNonEmptyString,
     cleanName,
     looksLikeId,
@@ -226,7 +232,6 @@ export function registerBaseRoutes(ctx) {
     requireAuth,
     looksLikeId,
     cleanName,
-    isNonEmptyString,
     assertFarmOwner,
     assertZoneOwner,
   } = ctx;
@@ -288,7 +293,9 @@ export function registerBaseRoutes(ctx) {
       return res.status(201).json({ farm });
     } catch (err) {
       if (err?.code === "P2002") {
-        return res.status(409).json({ error: "Ya existe una finca con ese nombre." });
+        return res
+          .status(409)
+          .json({ error: "Ya existe una finca con ese nombre." });
       }
       console.error("CREATE_FARM_ERROR:", err);
       return res.status(500).json({ error: "Error interno creando finca." });
@@ -311,12 +318,24 @@ export function registerBaseRoutes(ctx) {
         prisma.mapPoint.findMany({
           where: { farmId },
           orderBy: { createdAt: "asc" },
-          select: { id: true, name: true, data: true, createdAt: true, updatedAt: true },
+          select: {
+            id: true,
+            name: true,
+            data: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         }),
         prisma.mapLine.findMany({
           where: { farmId },
           orderBy: { createdAt: "asc" },
-          select: { id: true, name: true, data: true, createdAt: true, updatedAt: true },
+          select: {
+            id: true,
+            name: true,
+            data: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         }),
         prisma.mapZone.findMany({
           where: { farmId },
@@ -358,6 +377,7 @@ export function registerBaseRoutes(ctx) {
       const safeZones = Array.isArray(zones) ? zones : [];
 
       const result = await prisma.$transaction(async (tx) => {
+        // 1) view (opcional)
         if (view) {
           const preferredCenter =
             view && Array.isArray(view.center) ? view.center : null;
@@ -371,39 +391,115 @@ export function registerBaseRoutes(ctx) {
           });
         }
 
-        await tx.mapPoint.deleteMany({ where: { farmId } });
-        await tx.mapLine.deleteMany({ where: { farmId } });
-        await tx.mapZone.deleteMany({ where: { farmId } });
+        // ======================================================
+        // 2) DIFF + UPSERT SEGURO (NO deleteMany total)
+        //    Esto preserva createdAt y hace updatedAt real.
+        // ======================================================
 
-        if (safePoints.length > 0) {
-          await tx.mapPoint.createMany({
-            data: safePoints.map((p) => ({
-              farmId,
-              name: cleanName(p?.name, "Punto"),
-              data: p?.data ?? p,
-            })),
+        // ----- POINTS -----
+        const pointIds = safePoints
+          .map((p) => safeClientId(p?.id))
+          .filter(Boolean);
+
+        // Borra puntos que ya no vienen
+        if (pointIds.length === 0) {
+          await tx.mapPoint.deleteMany({ where: { farmId } });
+        } else {
+          await tx.mapPoint.deleteMany({
+            where: { farmId, id: { notIn: pointIds } },
           });
         }
 
-        if (safeLines.length > 0) {
-          await tx.mapLine.createMany({
-            data: safeLines.map((l) => ({
-              farmId,
-              name: cleanName(l?.name, "Línea"),
-              data: l?.data ?? l,
-            })),
+        // Upsert seguro (updateMany por id+farmId)
+        for (const p of safePoints) {
+          const id = safeClientId(p?.id);
+          const data = p?.data ?? p;
+          const name = cleanName(p?.name, "Punto");
+
+          if (id) {
+            const up = await tx.mapPoint.updateMany({
+              where: { id, farmId },
+              data: { name, data },
+            });
+            if (up.count === 0) {
+              await tx.mapPoint.create({
+                data: { id, farmId, name, data },
+              });
+            }
+          } else {
+            await tx.mapPoint.create({
+              data: { farmId, name, data },
+            });
+          }
+        }
+
+        // ----- LINES -----
+        const lineIds = safeLines
+          .map((l) => safeClientId(l?.id))
+          .filter(Boolean);
+
+        if (lineIds.length === 0) {
+          await tx.mapLine.deleteMany({ where: { farmId } });
+        } else {
+          await tx.mapLine.deleteMany({
+            where: { farmId, id: { notIn: lineIds } },
           });
         }
 
-        if (safeZones.length > 0) {
-          for (const z of safeZones) {
+        for (const l of safeLines) {
+          const id = safeClientId(l?.id);
+          const data = l?.data ?? l;
+          const name = cleanName(l?.name, "Línea");
+
+          if (id) {
+            const up = await tx.mapLine.updateMany({
+              where: { id, farmId },
+              data: { name, data },
+            });
+            if (up.count === 0) {
+              await tx.mapLine.create({
+                data: { id, farmId, name, data },
+              });
+            }
+          } else {
+            await tx.mapLine.create({
+              data: { farmId, name, data },
+            });
+          }
+        }
+
+        // ----- ZONES -----
+        const zoneIds = safeZones
+          .map((z) => safeClientId(z?.id))
+          .filter(Boolean);
+
+        if (zoneIds.length === 0) {
+          await tx.mapZone.deleteMany({ where: { farmId } });
+        } else {
+          await tx.mapZone.deleteMany({
+            where: { farmId, id: { notIn: zoneIds } },
+          });
+        }
+
+        for (const z of safeZones) {
+          const id = safeClientId(z?.id);
+          const data = z?.data ?? z;
+          const name = cleanName(z?.name, "Zona");
+          const components = z?.components ?? null;
+
+          if (id) {
+            const up = await tx.mapZone.updateMany({
+              where: { id, farmId },
+              data: { name, data, components },
+            });
+            if (up.count === 0) {
+              await tx.mapZone.create({
+                data: { id, farmId, name, data, components },
+              });
+            }
+          } else {
             await tx.mapZone.create({
-              data: {
-                farmId,
-                name: cleanName(z?.name, "Zona"),
-                data: z?.data ?? z,
-                components: z?.components ?? {},
-              },
+              data: { farmId, name, data, components },
             });
           }
         }
@@ -426,36 +522,40 @@ export function registerBaseRoutes(ctx) {
   });
 
   // PUT /api/farms/:farmId/zones/:zoneId/components
-  router.put("/farms/:farmId/zones/:zoneId/components", requireAuth, async (req, res) => {
-    try {
-      const { farmId, zoneId } = req.params;
-      const userId = req.user.id;
-      const { components } = req.body || {};
+  router.put(
+    "/farms/:farmId/zones/:zoneId/components",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const { farmId, zoneId } = req.params;
+        const userId = req.user.id;
+        const { components } = req.body || {};
 
-      if (!looksLikeId(farmId) || !looksLikeId(zoneId)) {
-        return res.status(400).json({ error: "IDs inválidos." });
+        if (!looksLikeId(farmId) || !looksLikeId(zoneId)) {
+          return res.status(400).json({ error: "IDs inválidos." });
+        }
+
+        if (components === undefined) {
+          return res.status(400).json({ error: "components es requerido." });
+        }
+
+        const farm = await assertFarmOwner(farmId, userId);
+        if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
+
+        const zone = await assertZoneOwner(zoneId, farmId);
+        if (!zone) return res.status(404).json({ error: "Zona no encontrada." });
+
+        const updatedZone = await prisma.mapZone.update({
+          where: { id: zoneId },
+          data: { components },
+          select: { id: true, name: true, components: true, updatedAt: true },
+        });
+
+        return res.json({ ok: true, zone: updatedZone });
+      } catch (err) {
+        console.error("UPDATE_COMPONENTS_ERROR:", err);
+        return res.status(500).json({ error: "Error guardando componentes." });
       }
-
-      if (components === undefined) {
-        return res.status(400).json({ error: "components es requerido." });
-      }
-
-      const farm = await assertFarmOwner(farmId, userId);
-      if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
-
-      const zone = await assertZoneOwner(zoneId, farmId);
-      if (!zone) return res.status(404).json({ error: "Zona no encontrada." });
-
-      const updatedZone = await prisma.mapZone.update({
-        where: { id: zoneId },
-        data: { components },
-        select: { id: true, name: true, components: true, updatedAt: true },
-      });
-
-      return res.json({ ok: true, zone: updatedZone });
-    } catch (err) {
-      console.error("UPDATE_COMPONENTS_ERROR:", err);
-      return res.status(500).json({ error: "Error guardando componentes." });
     }
-  });
+  );
 }
