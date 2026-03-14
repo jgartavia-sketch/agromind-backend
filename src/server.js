@@ -11,6 +11,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 
 import authRouter from "./routes/auth.js";
 import farmsRouter from "./routes/farms.js";
+import processesRouter from "./routes/processes.js";
 
 dotenv.config();
 
@@ -35,7 +36,6 @@ const isVercelPreview = (origin = "") =>
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // Requests sin Origin (Thunder/Postman/server-to-server) → permitir
     if (!origin) return cb(null, true);
 
     if (ALLOWED_ORIGINS.includes(origin) || isVercelPreview(origin)) {
@@ -45,10 +45,7 @@ const corsOptions = {
     return cb(new Error(`CORS bloqueado para origin: ${origin}`));
   },
 
-  // ✅ IMPORTANTE: tu auth real es por Authorization Bearer (JWT), NO por cookies
-  // entonces no necesitamos credentials. Esto reduce problemas CORS.
   credentials: false,
-
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   optionsSuccessStatus: 204,
@@ -57,7 +54,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// ✅ Diagnóstico CORS (para confirmar que Render está corriendo ESTE server.js)
+// ✅ Diagnóstico CORS
 app.get("/__cors", (req, res) => {
   res.json({
     ok: true,
@@ -68,7 +65,7 @@ app.get("/__cors", (req, res) => {
   });
 });
 
-// Handler de error CORS (respuesta limpia)
+// Handler de error CORS
 app.use((err, req, res, next) => {
   if (err && String(err.message || "").startsWith("CORS bloqueado")) {
     return res.status(403).json({ error: err.message });
@@ -356,7 +353,10 @@ app.use("/auth", authRouter(prisma));
 // API (Mapa / Fincas / Finanzas / Activos)
 app.use("/api", farmsRouter(prisma));
 
-// ✅ INVESTIGADOR IA (fase 1: analizar imagen)
+// ✅ GESTOR DE PROCESOS
+app.use("/api/processes", processesRouter(prisma));
+
+// ✅ INVESTIGADOR IA
 app.post("/api/investigator/analyze", async (req, res) => {
   try {
     const { farmId, zoneName, imageDataUrl, extraContext } = req.body || {};

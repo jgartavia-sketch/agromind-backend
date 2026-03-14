@@ -85,7 +85,8 @@ model MapZone {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  farm      Farm          @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  processes ZoneProcess[]
 
   @@index([farmId])
   @@index([farmId, updatedAt])
@@ -106,16 +107,25 @@ model Task {
   // ✅ fecha de vencimiento
   due DateTime
 
-  status    String
-  owner     String?
+  status String
+  owner  String?
+
+  // ✅ vínculo opcional a gestor de procesos
+  zoneProcessId     String?
+  zoneProcessStepId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  farm            Farm             @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  zoneProcess     ZoneProcess?     @relation("ProcessTasks", fields: [zoneProcessId], references: [id], onDelete: SetNull)
+  zoneProcessStep ZoneProcessStep? @relation("ProcessStepTasks", fields: [zoneProcessStepId], references: [id], onDelete: SetNull)
 
   @@index([farmId])
   @@index([farmId, start])
   @@index([farmId, due])
+  @@index([zoneProcessId])
+  @@index([zoneProcessStepId])
 }
 
 model FinanceMovement {
@@ -170,4 +180,55 @@ model Asset {
   @@index([farmId])
   @@index([farmId, purchaseDate])
   @@index([farmId, category])
+}
+
+/////////////////////////////////////////////////////////////
+// ✅ GESTOR DE PROCESOS POR ZONA
+/////////////////////////////////////////////////////////////
+
+model ZoneProcess {
+  id          String    @id @default(cuid())
+  zoneId      String
+  name        String
+  description String?
+  type        String    @default("General")
+  status      String    @default("Borrador")
+  isRecurring Boolean   @default(false)
+  startDate   DateTime?
+  targetDate  DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  zone  MapZone           @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  steps ZoneProcessStep[]
+  tasks Task[]            @relation("ProcessTasks")
+
+  @@index([zoneId])
+  @@index([zoneId, status])
+  @@index([zoneId, type])
+  @@index([createdAt])
+}
+
+model ZoneProcessStep {
+  id          String    @id @default(cuid())
+  processId   String
+  name        String
+  description String?
+  stepOrder   Int
+  status      String    @default("Pendiente")
+  startDate   DateTime?
+  dueDate     DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  process ZoneProcess @relation(fields: [processId], references: [id], onDelete: Cascade)
+  tasks   Task[]      @relation("ProcessStepTasks")
+
+  @@index([processId])
+  @@index([processId, stepOrder])
+  @@index([processId, status])
 }
