@@ -13,6 +13,9 @@ import authRouter from "./routes/auth.js";
 import farmsRouter from "./routes/farms.js";
 import processesRouter from "./routes/processes.js";
 
+import { verifyEmailTransport } from "./services/emailService.js";
+import { sendDueTomorrowTaskReminders } from "./services/taskReminderService.js";
+
 dotenv.config();
 
 const app = express();
@@ -47,7 +50,7 @@ const corsOptions = {
 
   credentials: false,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-admin-alerts-key"],
   optionsSuccessStatus: 204,
 };
 
@@ -308,6 +311,28 @@ async function callOpenAIForInvestigation({
 }
 
 // =========================
+// Seguridad interna simple
+// =========================
+function requireAdminAlertsKey(req, res, next) {
+  const expected = String(process.env.ADMIN_ALERTS_KEY || "").trim();
+
+  if (!expected) {
+    return res.status(500).json({
+      error:
+        "Falta ADMIN_ALERTS_KEY en el .env del backend. No se puede usar esta ruta todavía.",
+    });
+  }
+
+  const received = String(req.headers["x-admin-alerts-key"] || "").trim();
+
+  if (!received || received !== expected) {
+    return res.status(401).json({ error: "No autorizado." });
+  }
+
+  return next();
+}
+
+// =========================
 // DIAGNÓSTICO (para Render)
 // =========================
 app.get("/__version", (req, res) => {
@@ -344,6 +369,8 @@ app.get("/api/health", (req, res) => {
     ok: true,
     time: new Date().toISOString(),
     hasOpenAIKey: safeBool(!!process.env.OPENAI_API_KEY),
+    hasEmailUser: safeBool(!!process.env.EMAIL_USER),
+    hasEmailPass: safeBool(!!process.env.EMAIL_PASS),
   });
 });
 
@@ -355,6 +382,40 @@ app.use("/api", farmsRouter(prisma));
 
 // ✅ GESTOR DE PROCESOS
 app.use("/api/processes", processesRouter(prisma));
+
+// ✅ RUTA MANUAL SEGURA PARA RECORDATORIOS
+app.post("/api/admin/run-task-reminders", requireAdminAlertsKey, async (req, res) => {
+  try {
+    const result = await sendDueTomorrowTaskReminders(prisma);
+
+    return res.json({
+      ok: true,
+      message: "Proceso de recordatorios ejecutado.",
+      ...result,
+    });
+  } catch (e) {
+    return res.status(500).json({
+      error: "Error ejecutando recordatorios.",
+      details: String(e?.message || e),
+    });
+  }
+});
+
+// ✅ VALIDAR QUE EL TRANSPORTE DE EMAIL ESTÁ LISTO
+app.get("/api/admin/email-status", requireAdminAlertsKey, async (req, res) => {
+  try {
+    await verifyEmailTransport();
+    return res.json({
+      ok: true,
+      message: "Servicio de email listo.",
+    });
+  } catch (e) {
+    return res.status(500).json({
+      error: "Servicio de email no disponible.",
+      details: String(e?.message || e),
+    });
+  }
+});
 
 // ✅ INVESTIGADOR IA
 app.post("/api/investigator/analyze", async (req, res) => {
@@ -405,6 +466,12 @@ app.post("/api/investigator/analyze", async (req, res) => {
 // ARRANQUE
 // =========================
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✅ API listening on port ${PORT}`);
+
+  try {
+    await verifyEmailTransport();
+  } catch (e) {
+    console.error("⚠️ Email no verificado al arrancar:", String(e?.message || e));
+  }
 });
