@@ -384,22 +384,26 @@ app.use("/api", farmsRouter(prisma));
 app.use("/api/processes", processesRouter(prisma));
 
 // ✅ RUTA MANUAL SEGURA PARA RECORDATORIOS
-app.post("/api/admin/run-task-reminders", requireAdminAlertsKey, async (req, res) => {
-  try {
-    const result = await sendDueTomorrowTaskReminders(prisma);
+app.post(
+  "/api/admin/run-task-reminders",
+  requireAdminAlertsKey,
+  async (req, res) => {
+    try {
+      const result = await sendDueTomorrowTaskReminders(prisma);
 
-    return res.json({
-      ok: true,
-      message: "Proceso de recordatorios ejecutado.",
-      ...result,
-    });
-  } catch (e) {
-    return res.status(500).json({
-      error: "Error ejecutando recordatorios.",
-      details: String(e?.message || e),
-    });
+      return res.json({
+        ok: true,
+        message: "Proceso de recordatorios ejecutado.",
+        ...result,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        error: "Error ejecutando recordatorios.",
+        details: String(e?.message || e),
+      });
+    }
   }
-});
+);
 
 // ✅ VALIDAR QUE EL TRANSPORTE DE EMAIL ESTÁ LISTO
 app.get("/api/admin/email-status", requireAdminAlertsKey, async (req, res) => {
@@ -465,13 +469,19 @@ app.post("/api/investigator/analyze", async (req, res) => {
 // =========================
 // ARRANQUE
 // =========================
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, async () => {
-  console.log(`✅ API listening on port ${PORT}`);
+const PORT = Number(process.env.PORT) || 3001;
+const HOST = "0.0.0.0";
+
+app.listen(PORT, HOST, async () => {
+  console.log(`✅ API listening on http://${HOST}:${PORT}`);
+  console.log(`🌱 AgroMind backend listo en puerto ${PORT}`);
 
   try {
     await verifyEmailTransport();
   } catch (e) {
-    console.error("⚠️ Email no verificado al arrancar:", String(e?.message || e));
+    console.error(
+      "⚠️ Email no verificado al arrancar:",
+      String(e?.message || e)
+    );
   }
 });
