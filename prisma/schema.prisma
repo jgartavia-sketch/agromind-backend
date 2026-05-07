@@ -183,7 +183,7 @@ model Asset {
 }
 
 /////////////////////////////////////////////////////////////
-// ✅ GESTOR DE PROCESOS POR ZONA
+// ✅ GESTOR DE PROCESOS POR ZONA — versión reforzada
 /////////////////////////////////////////////////////////////
 
 model ZoneProcess {
@@ -193,6 +193,11 @@ model ZoneProcess {
   description String?
   type        String    @default("General")
   status      String    @default("Borrador")
+
+  // ✅ NUEVO: control operativo real
+  owner       String?
+  priority    String    @default("Media")
+
   isRecurring Boolean   @default(false)
   startDate   DateTime?
   targetDate  DateTime?
@@ -208,6 +213,7 @@ model ZoneProcess {
   @@index([zoneId])
   @@index([zoneId, status])
   @@index([zoneId, type])
+  @@index([zoneId, priority])
   @@index([createdAt])
 }
 
@@ -218,6 +224,12 @@ model ZoneProcessStep {
   description String?
   stepOrder   Int
   status      String    @default("Pendiente")
+
+  // ✅ NUEVO: más control por etapa
+  owner       String?
+  priority    String    @default("Media")
+  notes       String?
+
   startDate   DateTime?
   dueDate     DateTime?
   completedAt DateTime?
@@ -231,4 +243,5 @@ model ZoneProcessStep {
   @@index([processId])
   @@index([processId, stepOrder])
   @@index([processId, status])
+  @@index([processId, priority])
 }

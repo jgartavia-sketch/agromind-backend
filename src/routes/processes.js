@@ -1,4 +1,3 @@
-// src/routes/processes.js
 import express from "express";
 import jwt from "jsonwebtoken";
 
@@ -30,6 +29,43 @@ function requireAuth(req, res, next) {
 
 function isNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
+}
+
+function cleanString(v, max = 255) {
+  if (!isNonEmptyString(v)) return null;
+  return v.trim().slice(0, max);
+}
+
+function cleanStatus(v, fallback) {
+  return isNonEmptyString(v) ? v.trim().slice(0, 40) : fallback;
+}
+
+function cleanPriority(v, fallback = "Media") {
+  return isNonEmptyString(v) ? v.trim().slice(0, 30) : fallback;
+}
+
+function parseDateOrNull(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function normalizeStepCompletion(status, completedAt, fallbackCurrent = null) {
+  const finalStatus = cleanStatus(status, "Pendiente");
+  const parsedCompletedAt =
+    completedAt === undefined ? fallbackCurrent : completedAt ? parseDateOrNull(completedAt) : null;
+
+  if (finalStatus === "Completada") {
+    return {
+      status: finalStatus,
+      completedAt: parsedCompletedAt || new Date(),
+    };
+  }
+
+  return {
+    status: finalStatus,
+    completedAt: null,
+  };
 }
 
 export default function processesRouter(prisma) {
@@ -88,15 +124,16 @@ export default function processesRouter(prisma) {
         description = "",
         type = "General",
         status = "Borrador",
+        priority = "Media",
+        owner = null,
         isRecurring = false,
         startDate = null,
         targetDate = null,
+        completedAt = null,
       } = req.body || {};
 
       if (!isNonEmptyString(zoneId) || !isNonEmptyString(name)) {
-        return res
-          .status(400)
-          .json({ error: "zoneId y name son obligatorios." });
+        return res.status(400).json({ error: "zoneId y name son obligatorios." });
       }
 
       const zone = await prisma.mapZone.findFirst({
@@ -113,16 +150,28 @@ export default function processesRouter(prisma) {
         return res.status(404).json({ error: "Zona no encontrada." });
       }
 
+      const parsedStartDate = parseDateOrNull(startDate);
+      const parsedTargetDate = parseDateOrNull(targetDate);
+      const parsedCompletedAt = parseDateOrNull(completedAt);
+
       const process = await prisma.zoneProcess.create({
         data: {
           zoneId,
-          name: name.trim(),
-          description: isNonEmptyString(description) ? description.trim() : null,
-          type: isNonEmptyString(type) ? type.trim() : "General",
-          status: isNonEmptyString(status) ? status.trim() : "Borrador",
+          name: name.trim().slice(0, 120),
+          description: cleanString(description, 500),
+          type: cleanString(type, 60) || "General",
+          status: cleanStatus(status, "Borrador"),
+          priority: cleanPriority(priority, "Media"),
+          owner: cleanString(owner, 120),
           isRecurring: Boolean(isRecurring),
-          startDate: startDate ? new Date(startDate) : null,
-          targetDate: targetDate ? new Date(targetDate) : null,
+          startDate: parsedStartDate,
+          targetDate: parsedTargetDate,
+          completedAt: parsedCompletedAt,
+        },
+        include: {
+          steps: {
+            orderBy: { stepOrder: "asc" },
+          },
         },
       });
 
@@ -145,6 +194,8 @@ export default function processesRouter(prisma) {
         description,
         type,
         status,
+        priority,
+        owner,
         isRecurring,
         startDate,
         targetDate,
@@ -167,37 +218,50 @@ export default function processesRouter(prisma) {
         return res.status(404).json({ error: "Proceso no encontrado." });
       }
 
+      const data = {
+        ...(name !== undefined
+          ? {
+              name: isNonEmptyString(name)
+                ? name.trim().slice(0, 120)
+                : "Proceso sin nombre",
+            }
+          : {}),
+        ...(description !== undefined
+          ? { description: cleanString(description, 500) }
+          : {}),
+        ...(type !== undefined
+          ? { type: cleanString(type, 60) || "General" }
+          : {}),
+        ...(status !== undefined
+          ? { status: cleanStatus(status, "Borrador") }
+          : {}),
+        ...(priority !== undefined
+          ? { priority: cleanPriority(priority, "Media") }
+          : {}),
+        ...(owner !== undefined
+          ? { owner: cleanString(owner, 120) }
+          : {}),
+        ...(isRecurring !== undefined
+          ? { isRecurring: Boolean(isRecurring) }
+          : {}),
+        ...(startDate !== undefined
+          ? { startDate: startDate ? parseDateOrNull(startDate) : null }
+          : {}),
+        ...(targetDate !== undefined
+          ? { targetDate: targetDate ? parseDateOrNull(targetDate) : null }
+          : {}),
+        ...(completedAt !== undefined
+          ? { completedAt: completedAt ? parseDateOrNull(completedAt) : null }
+          : {}),
+      };
+
       const updated = await prisma.zoneProcess.update({
         where: { id },
-        data: {
-          ...(name !== undefined
-            ? { name: isNonEmptyString(name) ? name.trim() : "Proceso sin nombre" }
-            : {}),
-          ...(description !== undefined
-            ? {
-                description: isNonEmptyString(description)
-                  ? description.trim()
-                  : null,
-              }
-            : {}),
-          ...(type !== undefined
-            ? { type: isNonEmptyString(type) ? type.trim() : "General" }
-            : {}),
-          ...(status !== undefined
-            ? { status: isNonEmptyString(status) ? status.trim() : "Borrador" }
-            : {}),
-          ...(isRecurring !== undefined
-            ? { isRecurring: Boolean(isRecurring) }
-            : {}),
-          ...(startDate !== undefined
-            ? { startDate: startDate ? new Date(startDate) : null }
-            : {}),
-          ...(targetDate !== undefined
-            ? { targetDate: targetDate ? new Date(targetDate) : null }
-            : {}),
-          ...(completedAt !== undefined
-            ? { completedAt: completedAt ? new Date(completedAt) : null }
-            : {}),
+        data,
+        include: {
+          steps: {
+            orderBy: { stepOrder: "asc" },
+          },
         },
       });
 
@@ -255,14 +319,16 @@ export default function processesRouter(prisma) {
         description = "",
         stepOrder,
         status = "Pendiente",
+        priority = "Media",
+        owner = null,
+        notes = "",
         startDate = null,
         dueDate = null,
+        completedAt = null,
       } = req.body || {};
 
       if (!isNonEmptyString(processId) || !isNonEmptyString(name)) {
-        return res
-          .status(400)
-          .json({ error: "processId y name son obligatorios." });
+        return res.status(400).json({ error: "processId y name son obligatorios." });
       }
 
       const process = await prisma.zoneProcess.findFirst({
@@ -288,19 +354,25 @@ export default function processesRouter(prisma) {
       }
 
       const nextOrder =
-        typeof stepOrder === "number"
+        typeof stepOrder === "number" && Number.isFinite(stepOrder)
           ? stepOrder
           : (process.steps?.[0]?.stepOrder || 0) + 1;
+
+      const normalizedCompletion = normalizeStepCompletion(status, completedAt);
 
       const step = await prisma.zoneProcessStep.create({
         data: {
           processId,
-          name: name.trim(),
-          description: isNonEmptyString(description) ? description.trim() : null,
+          name: name.trim().slice(0, 120),
+          description: cleanString(description, 500),
           stepOrder: nextOrder,
-          status: isNonEmptyString(status) ? status.trim() : "Pendiente",
-          startDate: startDate ? new Date(startDate) : null,
-          dueDate: dueDate ? new Date(dueDate) : null,
+          status: normalizedCompletion.status,
+          priority: cleanPriority(priority, "Media"),
+          owner: cleanString(owner, 120),
+          notes: cleanString(notes, 1000),
+          startDate: parseDateOrNull(startDate),
+          dueDate: parseDateOrNull(dueDate),
+          completedAt: normalizedCompletion.completedAt,
         },
       });
 
@@ -323,6 +395,9 @@ export default function processesRouter(prisma) {
         description,
         stepOrder,
         status,
+        priority,
+        owner,
+        notes,
         startDate,
         dueDate,
         completedAt,
@@ -339,42 +414,62 @@ export default function processesRouter(prisma) {
             },
           },
         },
-        select: { id: true },
+        select: {
+          id: true,
+          status: true,
+          completedAt: true,
+        },
       });
 
       if (!existing) {
         return res.status(404).json({ error: "Etapa no encontrada." });
       }
 
+      const data = {
+        ...(name !== undefined
+          ? {
+              name: isNonEmptyString(name)
+                ? name.trim().slice(0, 120)
+                : "Etapa sin nombre",
+            }
+          : {}),
+        ...(description !== undefined
+          ? { description: cleanString(description, 500) }
+          : {}),
+        ...(stepOrder !== undefined
+          ? { stepOrder: Number(stepOrder) || 1 }
+          : {}),
+        ...(priority !== undefined
+          ? { priority: cleanPriority(priority, "Media") }
+          : {}),
+        ...(owner !== undefined
+          ? { owner: cleanString(owner, 120) }
+          : {}),
+        ...(notes !== undefined
+          ? { notes: cleanString(notes, 1000) }
+          : {}),
+        ...(startDate !== undefined
+          ? { startDate: startDate ? parseDateOrNull(startDate) : null }
+          : {}),
+        ...(dueDate !== undefined
+          ? { dueDate: dueDate ? parseDateOrNull(dueDate) : null }
+          : {}),
+      };
+
+      if (status !== undefined || completedAt !== undefined) {
+        const normalizedCompletion = normalizeStepCompletion(
+          status !== undefined ? status : existing.status,
+          completedAt,
+          existing.completedAt
+        );
+
+        data.status = normalizedCompletion.status;
+        data.completedAt = normalizedCompletion.completedAt;
+      }
+
       const updated = await prisma.zoneProcessStep.update({
         where: { id },
-        data: {
-          ...(name !== undefined
-            ? { name: isNonEmptyString(name) ? name.trim() : "Etapa sin nombre" }
-            : {}),
-          ...(description !== undefined
-            ? {
-                description: isNonEmptyString(description)
-                  ? description.trim()
-                  : null,
-              }
-            : {}),
-          ...(stepOrder !== undefined
-            ? { stepOrder: Number(stepOrder) || 1 }
-            : {}),
-          ...(status !== undefined
-            ? { status: isNonEmptyString(status) ? status.trim() : "Pendiente" }
-            : {}),
-          ...(startDate !== undefined
-            ? { startDate: startDate ? new Date(startDate) : null }
-            : {}),
-          ...(dueDate !== undefined
-            ? { dueDate: dueDate ? new Date(dueDate) : null }
-            : {}),
-          ...(completedAt !== undefined
-            ? { completedAt: completedAt ? new Date(completedAt) : null }
-            : {}),
-        },
+        data,
       });
 
       return res.json(updated);

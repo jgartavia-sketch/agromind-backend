@@ -1,0 +1,1 @@
+SELECT email, "createdAt" FROM "User";
