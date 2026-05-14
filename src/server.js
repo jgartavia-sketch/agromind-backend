@@ -12,6 +12,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import authRouter from "./routes/auth.js";
 import farmsRouter from "./routes/farms.js";
 import processesRouter from "./routes/processes.js";
+import bitacoraRouter from "./routes/bitacora.js";
 
 import { verifyEmailTransport } from "./services/emailService.js";
 import { sendDueTomorrowTaskReminders } from "./services/taskReminderService.js";
@@ -21,12 +22,8 @@ dotenv.config();
 const app = express();
 app.set("trust proxy", 1);
 
-// 👇 IMPORTANTE: para imágenes en base64 (data URL) ocupamos más límite que el default
 app.use(express.json({ limit: "15mb" }));
 
-// =========================
-// CORS (PRODUCCIÓN-READY)
-// =========================
 const ALLOWED_ORIGINS = [
   "https://www.agromindcr.es",
   "https://agromindcr.es",
@@ -57,7 +54,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// ✅ Diagnóstico CORS
 app.get("/__cors", (req, res) => {
   res.json({
     ok: true,
@@ -68,7 +64,6 @@ app.get("/__cors", (req, res) => {
   });
 });
 
-// Handler de error CORS
 app.use((err, req, res, next) => {
   if (err && String(err.message || "").startsWith("CORS bloqueado")) {
     return res.status(403).json({ error: err.message });
@@ -76,9 +71,6 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
-// =========================
-// Prisma / DB
-// =========================
 if (!process.env.DATABASE_URL) {
   throw new Error("Falta DATABASE_URL en .env");
 }
@@ -91,9 +83,6 @@ const pool = new Pool({
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
-// =========================
-// Helpers IA
-// =========================
 function safeBool(v) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
@@ -159,47 +148,16 @@ async function callOpenAIForInvestigation({
     additionalProperties: false,
     properties: {
       category: { type: "string", enum: ["plant", "animal", "unknown"] },
-      likely_subject: {
-        type: "string",
-        description: "Qué crees que es (cultivo/animal) en términos simples.",
-      },
-      likely_species_or_type: {
-        type: "string",
-        description: "Especie o tipo probable (si aplica).",
-      },
-      issue: {
-        type: "string",
-        description: "Problema principal observado o sospechado.",
-      },
+      likely_subject: { type: "string" },
+      likely_species_or_type: { type: "string" },
+      issue: { type: "string" },
       severity: { type: "string", enum: ["low", "medium", "high"] },
       confidence: { type: "number", minimum: 0, maximum: 1 },
-      key_observations: {
-        type: "array",
-        items: { type: "string" },
-        description: "Señales visibles que sustentan el diagnóstico.",
-      },
-      recommended_actions: {
-        type: "array",
-        items: { type: "string" },
-        description:
-          "Acciones prácticas y seguras (sin dosis médicas). Prioriza campo: revisar, aislar, higiene, riego, poda, muestreo, etc.",
-      },
-      questions_to_confirm: {
-        type: "array",
-        items: { type: "string" },
-        description:
-          "Preguntas para confirmar el diagnóstico (síntomas, tiempo, clima, alimento, etc.)",
-      },
-      urgency: {
-        type: "string",
-        enum: ["none", "soon", "urgent"],
-        description: "Qué tan urgente es actuar o consultar un profesional.",
-      },
-      economic_hint: {
-        type: "string",
-        description:
-          "Pista económica simple (pérdida de rendimiento, riesgo de mortalidad, necesidad de reposición, etc.).",
-      },
+      key_observations: { type: "array", items: { type: "string" } },
+      recommended_actions: { type: "array", items: { type: "string" } },
+      questions_to_confirm: { type: "array", items: { type: "string" } },
+      urgency: { type: "string", enum: ["none", "soon", "urgent"] },
+      economic_hint: { type: "string" },
     },
     required: [
       "category",
@@ -310,9 +268,6 @@ async function callOpenAIForInvestigation({
   return { ok: true, status: 200, result: parsed };
 }
 
-// =========================
-// Seguridad interna simple
-// =========================
 function requireAdminAlertsKey(req, res, next) {
   const expected = String(process.env.ADMIN_ALERTS_KEY || "").trim();
 
@@ -332,9 +287,6 @@ function requireAdminAlertsKey(req, res, next) {
   return next();
 }
 
-// =========================
-// DIAGNÓSTICO (para Render)
-// =========================
 app.get("/__version", (req, res) => {
   res.json({
     ok: true,
@@ -357,9 +309,6 @@ app.get("/__routes", (req, res) => {
   res.json({ routes });
 });
 
-// =========================
-// RUTAS
-// =========================
 app.get("/", (req, res) => {
   res.json({ message: "AgroMind Backend running 🚀" });
 });
@@ -374,16 +323,11 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// AUTH
 app.use("/auth", authRouter(prisma));
-
-// API (Mapa / Fincas / Finanzas / Activos)
 app.use("/api", farmsRouter(prisma));
-
-// ✅ GESTOR DE PROCESOS
+app.use("/api", bitacoraRouter(prisma));
 app.use("/api/processes", processesRouter(prisma));
 
-// ✅ RUTA MANUAL SEGURA PARA RECORDATORIOS
 app.post(
   "/api/admin/run-task-reminders",
   requireAdminAlertsKey,
@@ -405,7 +349,6 @@ app.post(
   }
 );
 
-// ✅ VALIDAR QUE EL TRANSPORTE DE EMAIL ESTÁ LISTO
 app.get("/api/admin/email-status", requireAdminAlertsKey, async (req, res) => {
   try {
     await verifyEmailTransport();
@@ -421,7 +364,6 @@ app.get("/api/admin/email-status", requireAdminAlertsKey, async (req, res) => {
   }
 });
 
-// ✅ INVESTIGADOR IA
 app.post("/api/investigator/analyze", async (req, res) => {
   try {
     const { farmId, zoneName, imageDataUrl, extraContext } = req.body || {};
@@ -466,9 +408,6 @@ app.post("/api/investigator/analyze", async (req, res) => {
   }
 });
 
-// =========================
-// ARRANQUE
-// =========================
 const PORT = Number(process.env.PORT) || 3001;
 const HOST = "0.0.0.0";
 

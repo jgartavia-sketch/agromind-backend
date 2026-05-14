@@ -29,15 +29,14 @@ model Farm {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  points    MapPoint[]
-  lines     MapLine[]
-  zones     MapZone[]
-  tasks     Task[]
-  movements FinanceMovement[]
-
-  // ✅ PASO 2: Activos (debajo de Finanzas) — ÚNICA fuente de verdad
-  assets Asset[]
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  points           MapPoint[]
+  lines            MapLine[]
+  zones            MapZone[]
+  tasks            Task[]
+  movements        FinanceMovement[]
+  assets           Asset[]
+  bitacoraEntries  BitacoraEntry[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -79,7 +78,6 @@ model MapZone {
   data       Json
   components Json?
 
-  // ✅ NUEVO: fecha de última actualización de NOTAS (no se mezcla con updatedAt general)
   notesUpdatedAt DateTime?
 
   createdAt DateTime @default(now())
@@ -101,16 +99,12 @@ model Task {
   type     String
   priority String
 
-  // ✅ fecha inicio (YA obligatoria)
   start DateTime
-
-  // ✅ fecha de vencimiento
-  due DateTime
+  due   DateTime
 
   status String
   owner  String?
 
-  // ✅ vínculo opcional a gestor de procesos
   zoneProcessId     String?
   zoneProcessStepId String?
 
@@ -139,7 +133,6 @@ model FinanceMovement {
   amount   Float
   note     String?
 
-  // ✅ número de factura (opcional)
   invoiceNumber String?
 
   createdAt DateTime @default(now())
@@ -152,10 +145,6 @@ model FinanceMovement {
   @@index([farmId, type])
 }
 
-/////////////////////////////////////////////////////////////
-// ✅ PASO 2: ACTIVOS (Assets) — finanzas reales, producción
-/////////////////////////////////////////////////////////////
-
 model Asset {
   id     String @id @default(cuid())
   farmId String
@@ -166,11 +155,8 @@ model Asset {
   purchaseValue Float
   purchaseDate  DateTime @default(now())
 
-  // Vida útil contable (años)
   usefulLifeYears Int @default(1)
-
-  // Valor residual (salvamento)
-  residualValue Float @default(0)
+  residualValue   Float @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -182,23 +168,37 @@ model Asset {
   @@index([farmId, category])
 }
 
-/////////////////////////////////////////////////////////////
-// ✅ GESTOR DE PROCESOS POR ZONA — versión reforzada
-/////////////////////////////////////////////////////////////
+model BitacoraEntry {
+  id     String @id @default(cuid())
+  farmId String
+
+  date DateTime @default(now())
+
+  text     String
+  insights Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+
+  @@index([farmId])
+  @@index([farmId, date])
+  @@index([farmId, createdAt])
+}
 
 model ZoneProcess {
-  id          String    @id @default(cuid())
+  id          String @id @default(cuid())
   zoneId      String
   name        String
   description String?
-  type        String    @default("General")
-  status      String    @default("Borrador")
+  type        String @default("General")
+  status      String @default("Borrador")
 
-  // ✅ NUEVO: control operativo real
-  owner       String?
-  priority    String    @default("Media")
+  owner    String?
+  priority String @default("Media")
 
-  isRecurring Boolean   @default(false)
+  isRecurring Boolean @default(false)
   startDate   DateTime?
   targetDate  DateTime?
   completedAt DateTime?
@@ -218,17 +218,16 @@ model ZoneProcess {
 }
 
 model ZoneProcessStep {
-  id          String    @id @default(cuid())
+  id          String @id @default(cuid())
   processId   String
   name        String
   description String?
   stepOrder   Int
-  status      String    @default("Pendiente")
+  status      String @default("Pendiente")
 
-  // ✅ NUEVO: más control por etapa
-  owner       String?
-  priority    String    @default("Media")
-  notes       String?
+  owner    String?
+  priority String @default("Media")
+  notes    String?
 
   startDate   DateTime?
   dueDate     DateTime?
