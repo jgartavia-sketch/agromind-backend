@@ -31,11 +31,8 @@ function formatDateCR(date) {
   }
 }
 
-function buildTaskDueTomorrowEmail({ userName, farmName, tasks }) {
-  const safeUserName = userName || "Usuario";
-  const safeFarmName = farmName || "tu finca";
-
-  const tasksHtml = tasks
+function buildTasksTableHtml(tasks) {
+  return tasks
     .map(
       (task) => `
         <tr>
@@ -48,20 +45,36 @@ function buildTaskDueTomorrowEmail({ userName, farmName, tasks }) {
       `
     )
     .join("");
+}
 
-  const textLines = tasks.map(
+function buildTasksTextLines(tasks) {
+  return tasks.map(
     (task) =>
       `- ${task.title} | Zona: ${task.zone || "—"} | Tipo: ${
         task.type || "—"
       } | Prioridad: ${task.priority || "—"} | Vence: ${formatDateCR(task.due)}`
   );
+}
+
+function buildTaskDueEmail({
+  userName,
+  farmName,
+  tasks,
+  subject,
+  introText,
+}) {
+  const safeUserName = userName || "Usuario";
+  const safeFarmName = farmName || "tu finca";
+
+  const tasksHtml = buildTasksTableHtml(tasks);
+  const textLines = buildTasksTextLines(tasks);
 
   return {
-    subject: `AgroMind CR • ${tasks.length} tarea(s) vencen mañana`,
+    subject,
     text: [
       `Hola ${safeUserName},`,
       ``,
-      `Estas tareas de ${safeFarmName} vencen mañana:`,
+      `${introText} de ${safeFarmName}:`,
       ...textLines,
       ``,
       `Revisa tu operación en https://www.agromindcr.es`,
@@ -71,7 +84,7 @@ function buildTaskDueTomorrowEmail({ userName, farmName, tasks }) {
         <h2 style="margin:0 0 8px 0;">AgroMind CR</h2>
         <p style="margin:0 0 12px 0;">Hola <strong>${safeUserName}</strong>,</p>
         <p style="margin:0 0 12px 0;">
-          Estas tareas de <strong>${safeFarmName}</strong> vencen mañana.
+          ${introText} de <strong>${safeFarmName}</strong>.
         </p>
 
         <table style="width:100%;border-collapse:collapse;margin:16px 0;background:#ffffff;">
@@ -97,6 +110,119 @@ function buildTaskDueTomorrowEmail({ userName, farmName, tasks }) {
         </p>
       </div>
     `,
+  };
+}
+
+function buildTaskDueTomorrowEmail({ userName, farmName, tasks }) {
+  return buildTaskDueEmail({
+    userName,
+    farmName,
+    tasks,
+    subject: `AgroMind CR • ${tasks.length} tarea(s) vencen mañana`,
+    introText: "Estas tareas vencen mañana",
+  });
+}
+
+function buildTaskDueTodayEmail({ userName, farmName, tasks }) {
+  return buildTaskDueEmail({
+    userName,
+    farmName,
+    tasks,
+    subject: `AgroMind CR • ${tasks.length} tarea(s) vencen hoy`,
+    introText: "Estas tareas llegan hoy a su fecha de finalización",
+  });
+}
+
+async function sendGroupedTaskEmails({ tasks, buildEmailPayload }) {
+  const groupedByUserAndFarm = new Map();
+
+  for (const task of tasks) {
+    const userEmail = task?.farm?.user?.email;
+    const userId = task?.farm?.user?.id;
+    const farmId = task?.farm?.id;
+
+    if (!userEmail || !userId || !farmId) continue;
+
+    const key = `${userId}::${farmId}`;
+
+    if (!groupedByUserAndFarm.has(key)) {
+      groupedByUserAndFarm.set(key, {
+        userEmail,
+        userName: task.farm.user.name || "",
+        farmName: task.farm.name || "Mi finca",
+        tasks: [],
+      });
+    }
+
+    groupedByUserAndFarm.get(key).tasks.push(task);
+  }
+
+  let usersNotified = 0;
+
+  for (const [, group] of groupedByUserAndFarm) {
+    const emailPayload = buildEmailPayload(group);
+
+    await sendEmail({
+      to: group.userEmail,
+      subject: emailPayload.subject,
+      text: emailPayload.text,
+      html: emailPayload.html,
+    });
+
+    usersNotified += 1;
+  }
+
+  return usersNotified;
+}
+
+export async function sendDueTodayTaskReminders(prisma) {
+  const now = new Date();
+
+  const todayStart = startOfDay(now);
+  const todayEnd = endOfDay(now);
+
+  const tasks = await prisma.task.findMany({
+    where: {
+      due: {
+        gte: todayStart,
+        lte: todayEnd,
+      },
+      status: {
+        not: "Completada",
+      },
+    },
+    include: {
+      farm: {
+        include: {
+          user: true,
+        },
+      },
+    },
+    orderBy: [{ due: "asc" }, { createdAt: "asc" }],
+  });
+
+  if (!tasks.length) {
+    console.log("📭 No hay tareas que venzan hoy.");
+    return {
+      ok: true,
+      scanned: 0,
+      usersNotified: 0,
+    };
+  }
+
+  const usersNotified = await sendGroupedTaskEmails({
+    tasks,
+    buildEmailPayload: buildTaskDueTodayEmail,
+  });
+
+  console.log(
+    `✅ Recordatorios de tareas venciendo hoy enviados. Usuarios notificados: ${usersNotified}`
+  );
+
+  return {
+    ok: true,
+    scanned: tasks.length,
+    usersNotified,
   };
 }
 
@@ -136,46 +262,13 @@ export async function sendDueTomorrowTaskReminders(prisma) {
     };
   }
 
-  const groupedByUserAndFarm = new Map();
-
-  for (const task of tasks) {
-    const userEmail = task?.farm?.user?.email;
-    const userId = task?.farm?.user?.id;
-    const farmId = task?.farm?.id;
-
-    if (!userEmail || !userId || !farmId) continue;
-
-    const key = `${userId}::${farmId}`;
-
-    if (!groupedByUserAndFarm.has(key)) {
-      groupedByUserAndFarm.set(key, {
-        userEmail,
-        userName: task.farm.user.name || "",
-        farmName: task.farm.name || "Mi finca",
-        tasks: [],
-      });
-    }
-
-    groupedByUserAndFarm.get(key).tasks.push(task);
-  }
-
-  let usersNotified = 0;
-
-  for (const [, group] of groupedByUserAndFarm) {
-    const emailPayload = buildTaskDueTomorrowEmail(group);
-
-    await sendEmail({
-      to: group.userEmail,
-      subject: emailPayload.subject,
-      text: emailPayload.text,
-      html: emailPayload.html,
-    });
-
-    usersNotified += 1;
-  }
+  const usersNotified = await sendGroupedTaskEmails({
+    tasks,
+    buildEmailPayload: buildTaskDueTomorrowEmail,
+  });
 
   console.log(
-    `✅ Recordatorios enviados. Usuarios notificados: ${usersNotified}`
+    `✅ Recordatorios de tareas venciendo mañana enviados. Usuarios notificados: ${usersNotified}`
   );
 
   return {

@@ -15,7 +15,10 @@ import processesRouter from "./routes/processes.js";
 import bitacoraRouter from "./routes/bitacora.js";
 
 import { verifyEmailTransport } from "./services/emailService.js";
-import { sendDueTomorrowTaskReminders } from "./services/taskReminderService.js";
+import {
+  sendDueTodayTaskReminders,
+  sendDueTomorrowTaskReminders,
+} from "./services/taskReminderService.js";
 
 dotenv.config();
 
@@ -333,12 +336,14 @@ app.post(
   requireAdminAlertsKey,
   async (req, res) => {
     try {
-      const result = await sendDueTomorrowTaskReminders(prisma);
+      const dueTodayResult = await sendDueTodayTaskReminders(prisma);
+      const dueTomorrowResult = await sendDueTomorrowTaskReminders(prisma);
 
       return res.json({
         ok: true,
         message: "Proceso de recordatorios ejecutado.",
-        ...result,
+        dueToday: dueTodayResult,
+        dueTomorrow: dueTomorrowResult,
       });
     } catch (e) {
       return res.status(500).json({

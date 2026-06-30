@@ -2,9 +2,20 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import { sendEmail } from "../services/emailService.js";
 
 export default function authRouter(prisma) {
   const router = express.Router();
+
+  const buildFrontendUrl = () => {
+    const raw =
+      process.env.FRONTEND_URL ||
+      process.env.CLIENT_URL ||
+      "https://www.agromindcr.es";
+
+    return String(raw).replace(/\/+$/, "");
+  };
 
   router.post("/register", async (req, res) => {
     try {
@@ -124,6 +135,129 @@ export default function authRouter(prisma) {
     } catch (err) {
       console.error("LOGIN_ERROR:", err);
       return res.status(500).json({ error: "Error interno en login." });
+    }
+  });
+
+  router.post("/forgot-password", async (req, res) => {
+    try {
+      const { email } = req.body || {};
+
+      if (!email) {
+        return res.status(400).json({ error: "El correo es obligatorio." });
+      }
+
+      const cleanEmail = String(email).trim().toLowerCase();
+
+      const user = await prisma.user.findUnique({
+        where: { email: cleanEmail },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+        },
+      });
+
+      const genericMessage =
+        "Si el correo está registrado, recibirás instrucciones para recuperar tu contraseña.";
+
+      if (!user) {
+        return res.json({ message: genericMessage });
+      }
+
+      const resetToken = crypto.randomBytes(32).toString("hex");
+      const resetExpires = new Date(Date.now() + 1000 * 60 * 30);
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          resetPasswordToken: resetToken,
+          resetPasswordExpires: resetExpires,
+        },
+      });
+
+      const frontendUrl = buildFrontendUrl();
+      const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
+
+      await sendEmail({
+        to: user.email,
+        subject: "Recuperar contraseña - AgroMind CR",
+        text: `Hola ${
+          user.name || "Productor"
+        }, usa este enlace para recuperar tu contraseña: ${resetUrl}. Este enlace vence en 30 minutos.`,
+        html: `
+          <div style="font-family: Arial, sans-serif; color: #111827; line-height: 1.6;">
+            <h2 style="margin-bottom: 8px;">AgroMind CR</h2>
+            <p>Hola ${user.name || "Productor"},</p>
+            <p>Recibimos una solicitud para recuperar tu contraseña.</p>
+            <p>
+              Haz clic en el siguiente botón para crear una nueva contraseña:
+            </p>
+            <p style="margin: 24px 0;">
+              <a
+                href="${resetUrl}"
+                target="_blank"
+                rel="noreferrer"
+                style="background: #1f7a3f; color: #ffffff; padding: 12px 18px; text-decoration: none; border-radius: 10px; font-weight: bold;"
+              >
+                Recuperar contraseña
+              </a>
+            </p>
+            <p>Este enlace vence en 30 minutos.</p>
+            <p>Si no solicitaste este cambio, puedes ignorar este correo.</p>
+          </div>
+        `,
+      });
+
+      return res.json({ message: genericMessage });
+    } catch (err) {
+      console.error("FORGOT_PASSWORD_ERROR:", err);
+      return res.status(500).json({ error: "Error interno al solicitar recuperación." });
+    }
+  });
+
+  router.post("/reset-password", async (req, res) => {
+    try {
+      const { token, password } = req.body || {};
+
+      if (!token || !password) {
+        return res.status(400).json({ error: "Token y nueva contraseña son obligatorios." });
+      }
+
+      if (String(password).length < 8) {
+        return res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres." });
+      }
+
+      const user = await prisma.user.findFirst({
+        where: {
+          resetPasswordToken: String(token).trim(),
+          resetPasswordExpires: {
+            gt: new Date(),
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (!user) {
+        return res.status(400).json({ error: "El enlace es inválido o ya expiró." });
+      }
+
+      const hash = await bcrypt.hash(String(password), 10);
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          password: hash,
+          resetPasswordToken: null,
+          resetPasswordExpires: null,
+        },
+      });
+
+      return res.json({ message: "Contraseña actualizada correctamente." });
+    } catch (err) {
+      console.error("RESET_PASSWORD_ERROR:", err);
+      return res.status(500).json({ error: "Error interno al actualizar contraseña." });
     }
   });
 
