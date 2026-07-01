@@ -84,19 +84,35 @@ export default function authRouter(prisma) {
   });
 
   router.post("/login", async (req, res) => {
+    const loginTraceId = `LOGIN_TRACE_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+
+    console.time(`${loginTraceId} TOTAL`);
+
     try {
+      console.time(`${loginTraceId} VALIDATIONS`);
+
       const { email, password } = req.body || {};
       const secret = process.env.JWT_SECRET;
 
       if (!email || !password) {
+        console.timeEnd(`${loginTraceId} VALIDATIONS`);
+        console.timeEnd(`${loginTraceId} TOTAL`);
         return res.status(400).json({ error: "Email y password son obligatorios." });
       }
 
       if (!secret) {
+        console.timeEnd(`${loginTraceId} VALIDATIONS`);
+        console.timeEnd(`${loginTraceId} TOTAL`);
         return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
+
+      console.timeEnd(`${loginTraceId} VALIDATIONS`);
+
+      console.time(`${loginTraceId} PRISMA_FIND_USER`);
 
       const user = await prisma.user.findUnique({
         where: { email: cleanEmail },
@@ -108,15 +124,25 @@ export default function authRouter(prisma) {
         },
       });
 
+      console.timeEnd(`${loginTraceId} PRISMA_FIND_USER`);
+
       if (!user) {
+        console.timeEnd(`${loginTraceId} TOTAL`);
         return res.status(401).json({ error: "Credenciales inválidas." });
       }
+
+      console.time(`${loginTraceId} BCRYPT_COMPARE`);
 
       const ok = await bcrypt.compare(String(password), user.password);
 
+      console.timeEnd(`${loginTraceId} BCRYPT_COMPARE`);
+
       if (!ok) {
+        console.timeEnd(`${loginTraceId} TOTAL`);
         return res.status(401).json({ error: "Credenciales inválidas." });
       }
+
+      console.time(`${loginTraceId} JWT_SIGN`);
 
       const token = jwt.sign(
         { sub: user.id, email: user.email, name: user.name || "" },
@@ -124,7 +150,11 @@ export default function authRouter(prisma) {
         { expiresIn: "7d" }
       );
 
-      return res.json({
+      console.timeEnd(`${loginTraceId} JWT_SIGN`);
+
+      console.time(`${loginTraceId} RESPONSE_JSON`);
+
+      const response = res.json({
         token,
         user: {
           id: user.id,
@@ -132,8 +162,14 @@ export default function authRouter(prisma) {
           name: user.name,
         },
       });
+
+      console.timeEnd(`${loginTraceId} RESPONSE_JSON`);
+      console.timeEnd(`${loginTraceId} TOTAL`);
+
+      return response;
     } catch (err) {
       console.error("LOGIN_ERROR:", err);
+      console.timeEnd(`${loginTraceId} TOTAL`);
       return res.status(500).json({ error: "Error interno en login." });
     }
   });
