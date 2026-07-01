@@ -302,6 +302,62 @@ export function registerBaseRoutes(ctx) {
     }
   });
 
+  // PUT /api/farms/:id
+  router.put("/farms/:id", requireAuth, async (req, res) => {
+    try {
+      const farmId = req.params.id;
+      const userId = req.user.id;
+      const { name, view } = req.body || {};
+
+      if (!looksLikeId(farmId)) {
+        return res.status(400).json({ error: "farmId inválido." });
+      }
+
+      const existingFarm = await assertFarmOwner(farmId, userId);
+      if (!existingFarm) {
+        return res.status(403).json({ error: "Sin acceso a esa finca." });
+      }
+
+      const data = {};
+
+      if (name !== undefined) {
+        data.name = cleanName(name, existingFarm.name || "Mi finca");
+      }
+
+      if (view !== undefined) {
+        data.view = view || null;
+        data.preferredCenter = view && Array.isArray(view.center) ? view.center : null;
+      }
+
+      if (Object.keys(data).length === 0) {
+        return res.status(400).json({ error: "No hay cambios para guardar." });
+      }
+
+      const farm = await prisma.farm.update({
+        where: { id: farmId },
+        data,
+        select: {
+          id: true,
+          name: true,
+          view: true,
+          preferredCenter: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      return res.json({ farm });
+    } catch (err) {
+      if (err?.code === "P2002") {
+        return res
+          .status(409)
+          .json({ error: "Ya existe una finca con ese nombre." });
+      }
+      console.error("UPDATE_FARM_ERROR:", err);
+      return res.status(500).json({ error: "Error interno actualizando finca." });
+    }
+  });
+
   // GET /api/farms/:id/map
   router.get("/farms/:id/map", requireAuth, async (req, res) => {
     try {
