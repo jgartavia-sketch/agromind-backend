@@ -41,6 +41,7 @@ model Farm {
   movements        FinanceMovement[]
   assets           Asset[]
   bitacoraEntries  BitacoraEntry[]
+  componentPhotos  ComponentPhoto[]
 
   @@unique([userId, name])
   @@index([userId])
@@ -87,12 +88,40 @@ model MapZone {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  farm      Farm          @relation(fields: [farmId], references: [id], onDelete: Cascade)
-  processes ZoneProcess[]
+  farm            Farm             @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  processes       ZoneProcess[]
+  componentPhotos ComponentPhoto[]
 
   @@index([farmId])
   @@index([farmId, updatedAt])
   @@index([farmId, notesUpdatedAt])
+}
+
+model ComponentPhoto {
+  id          String @id @default(cuid())
+  farmId      String
+  zoneId      String
+  componentId String
+
+  url          String
+  filename     String
+  originalName String?
+  mimeType     String?
+  sizeBytes    Int?
+  note         String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  farm Farm    @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  zone MapZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@index([farmId])
+  @@index([zoneId])
+  @@index([componentId])
+  @@index([zoneId, componentId])
+  @@index([farmId, zoneId, componentId])
+  @@index([createdAt])
 }
 
 model Task {

@@ -2,6 +2,9 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 import pkg from "@prisma/client";
 const { PrismaClient } = pkg;
@@ -22,10 +25,17 @@ import {
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, "..", "uploads");
+
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
 const app = express();
 app.set("trust proxy", 1);
 
 app.use(express.json({ limit: "15mb" }));
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 const ALLOWED_ORIGINS = [
   "https://www.agromindcr.es",
@@ -323,6 +333,7 @@ app.get("/api/health", (req, res) => {
     hasOpenAIKey: safeBool(!!process.env.OPENAI_API_KEY),
     hasEmailUser: safeBool(!!process.env.EMAIL_USER),
     hasEmailPass: safeBool(!!process.env.EMAIL_PASS),
+    uploadsPublicPath: "/uploads",
   });
 });
 
