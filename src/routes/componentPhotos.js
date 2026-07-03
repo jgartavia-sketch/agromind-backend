@@ -4,6 +4,7 @@ import express from "express";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
+import jwt from "jsonwebtoken";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,15 +26,34 @@ function ensureUploadDirs() {
   fs.mkdirSync(componentUploadsDir, { recursive: true });
 }
 
+function getBearerToken(req) {
+  const auth = req.headers.authorization || "";
+  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  return null;
+}
+
 function getRequestUserId(req) {
-  return (
+  const existingUserId =
     req.user?.id ||
     req.userId ||
     req.auth?.userId ||
     req.auth?.id ||
     req.currentUser?.id ||
-    null
-  );
+    null;
+
+  if (existingUserId) return existingUserId;
+
+  const token = getBearerToken(req);
+  const secret = process.env.JWT_SECRET;
+
+  if (!token || !secret) return null;
+
+  try {
+    const payload = jwt.verify(token, secret);
+    return payload?.sub || payload?.id || payload?.userId || null;
+  } catch {
+    return null;
+  }
 }
 
 function safeUnlink(filePath) {
@@ -132,7 +152,7 @@ export default function componentPhotosRouter(prisma) {
     res.json({ ok: true, module: "component-photos" });
   });
 
-  // GET /api/farms/component-photos/:zoneId/:componentId
+  // GET /api/component-photos/:zoneId/:componentId
   router.get("/:zoneId/:componentId", async (req, res) => {
     try {
       const userId = getRequestUserId(req);
@@ -178,7 +198,7 @@ export default function componentPhotosRouter(prisma) {
     }
   });
 
-  // POST /api/farms/component-photos/:zoneId/:componentId
+  // POST /api/component-photos/:zoneId/:componentId
   // Body multipart/form-data: photo=<file>
   router.post("/:zoneId/:componentId", multerSinglePhoto, async (req, res) => {
     let uploadedFilePath = req.file?.path || null;
@@ -262,7 +282,7 @@ export default function componentPhotosRouter(prisma) {
     }
   });
 
-  // DELETE /api/farms/component-photos/:photoId
+  // DELETE /api/component-photos/:photoId
   router.delete("/:photoId", async (req, res) => {
     try {
       const userId = getRequestUserId(req);
