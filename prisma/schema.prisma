@@ -128,7 +128,13 @@ model Task {
   id       String  @id @default(cuid())
   farmId   String
   title    String
+
+  // Legacy: se mantiene para no romper tareas viejas.
+  // A partir de esta migración, el frontend debe guardar zoneId/zoneType.
   zone     String?
+  zoneId   String?
+  zoneType String?
+
   type     String
   priority String
 
@@ -151,6 +157,8 @@ model Task {
   @@index([farmId])
   @@index([farmId, start])
   @@index([farmId, due])
+  @@index([farmId, zoneId])
+  @@index([farmId, zoneType])
   @@index([zoneProcessId])
   @@index([zoneProcessStepId])
 }

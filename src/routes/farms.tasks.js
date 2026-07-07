@@ -33,6 +33,8 @@ export function registerTaskRoutes(ctx) {
           farmId: true,
           title: true,
           zone: true,
+          zoneId: true,
+          zoneType: true,
           type: true,
           priority: true,
           start: true,
@@ -69,6 +71,8 @@ export function registerTaskRoutes(ctx) {
           id: true,
           title: true,
           zone: true,
+          zoneId: true,
+          zoneType: true,
           type: true,
           priority: true,
           status: true,
@@ -398,6 +402,8 @@ export function registerTaskRoutes(ctx) {
       const finalPriority = cleanName(priority, "Media");
       const finalStatus = cleanName(status, "Pendiente");
       const finalZone = isNonEmptyString(zone) ? zone.trim().slice(0, 120) : null;
+      const finalZoneId = isNonEmptyString(req.body.zoneId) ? req.body.zoneId.trim() : null;
+      const finalZoneType = isNonEmptyString(req.body.zoneType) ? req.body.zoneType.trim() : null;
       const finalOwner = isNonEmptyString(owner) ? owner.trim().slice(0, 80) : null;
 
       const startDate = parseISODateOnlyToUTC(start);
@@ -415,6 +421,8 @@ export function registerTaskRoutes(ctx) {
           farmId,
           title: finalTitle,
           zone: finalZone,
+          zoneId: finalZoneId,
+          zoneType: finalZoneType,
           type: finalType,
           priority: finalPriority,
           start: startDate,
@@ -427,6 +435,8 @@ export function registerTaskRoutes(ctx) {
           farmId: true,
           title: true,
           zone: true,
+          zoneId: true,
+          zoneType: true,
           type: true,
           priority: true,
           start: true,
@@ -515,6 +525,8 @@ export function registerTaskRoutes(ctx) {
           farmId: true,
           title: true,
           zone: true,
+          zoneId: true,
+          zoneType: true,
           type: true,
           priority: true,
           start: true,
