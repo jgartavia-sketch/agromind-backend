@@ -19,21 +19,28 @@ export default function authRouter(prisma) {
 
   router.post("/register", async (req, res) => {
     try {
-      const { name, email, password } = req.body || {};
+      const { name, email, password, invitationToken } = req.body || {};
       const secret = process.env.JWT_SECRET;
 
       if (!email || !password) {
-        return res.status(400).json({ error: "Email y password son obligatorios." });
+        return res.status(400).json({
+          error: "Email y password son obligatorios.",
+        });
       }
 
       if (!secret) {
-        return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
+        return res.status(500).json({
+          error: "Falta JWT_SECRET en el servidor.",
+        });
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
+      const cleanInvitationToken = String(invitationToken || "").trim();
 
       if (String(password).length < 8) {
-        return res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres." });
+        return res.status(400).json({
+          error: "La contraseña debe tener al menos 8 caracteres.",
+        });
       }
 
       const existing = await prisma.user.findUnique({
@@ -42,48 +49,67 @@ export default function authRouter(prisma) {
       });
 
       if (existing) {
-        return res.status(409).json({ error: "Ese email ya está registrado." });
+        return res.status(409).json({
+          error: "Ese email ya está registrado.",
+        });
+      }
+
+      let invitation = null;
+
+      if (cleanInvitationToken) {
+        invitation = await prisma.farmInvitation.findFirst({
+          where: {
+            token: cleanInvitationToken,
+            status: "PENDING",
+          },
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            farmId: true,
+            farm: {
+              select: {
+                id: true,
+                name: true,
+                createdAt: true,
+                updatedAt: true,
+              },
+            },
+          },
+        });
+
+        if (!invitation) {
+          return res.status(400).json({
+            error: "La invitación es inválida o ya fue utilizada.",
+          });
+        }
+
+        if (String(invitation.email).trim().toLowerCase() !== cleanEmail) {
+          return res.status(403).json({
+            error:
+              "Debes registrarte con el mismo correo al que se envió la invitación.",
+          });
+        }
       }
 
       const hash = await bcrypt.hash(String(password), 10);
 
-      const { user, farm } = await prisma.$transaction(async (tx) => {
+      const result = await prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
           data: {
             email: cleanEmail,
             name: name ? String(name).trim() : null,
             password: hash,
           },
-          select: { id: true, email: true, name: true, createdAt: true },
-        });
-
-        const farm = await tx.farm.create({
-          data: {
-            name: "Mi finca",
-            userId: user.id,
-            view: null,
-            preferredCenter: null,
-          },
-          select: { id: true, name: true, createdAt: true, updatedAt: true },
-        });
-
-        await tx.farmMember.create({
-          data: {
-            userId: user.id,
-            farmId: farm.id,
-            role: "ADMIN",
-            status: "ACTIVE",
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            createdAt: true,
           },
         });
 
-        const invitations = await tx.farmInvitation.findMany({
-          where: {
-            email: cleanEmail,
-            status: "PENDING",
-          },
-        });
-
-        for (const invitation of invitations) {
+        if (invitation) {
           await tx.farmMember.upsert({
             where: {
               userId_farmId: {
@@ -110,21 +136,77 @@ export default function authRouter(prisma) {
               acceptedAt: new Date(),
             },
           });
+
+          return {
+            user,
+            farm: invitation.farm,
+            membership: {
+              farmId: invitation.farmId,
+              role: invitation.role,
+              status: "ACTIVE",
+            },
+            registrationMode: "invitation",
+          };
         }
 
-        return { user, farm };
+        const farm = await tx.farm.create({
+          data: {
+            name: "Mi finca",
+            userId: user.id,
+            view: null,
+            preferredCenter: null,
+          },
+          select: {
+            id: true,
+            name: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        await tx.farmMember.create({
+          data: {
+            userId: user.id,
+            farmId: farm.id,
+            role: "ADMIN",
+            status: "ACTIVE",
+          },
+        });
+
+        return {
+          user,
+          farm,
+          membership: {
+            farmId: farm.id,
+            role: "ADMIN",
+            status: "ACTIVE",
+          },
+          registrationMode: "standard",
+        };
       });
 
       const token = jwt.sign(
-        { sub: user.id, email: user.email, name: user.name || "" },
+        {
+          sub: result.user.id,
+          email: result.user.email,
+          name: result.user.name || "",
+        },
         secret,
         { expiresIn: "7d" }
       );
 
-      return res.status(201).json({ token, user, farm });
+      return res.status(201).json({
+        token,
+        user: result.user,
+        farm: result.farm,
+        membership: result.membership,
+        registrationMode: result.registrationMode,
+      });
     } catch (err) {
       console.error("REGISTER_ERROR:", err);
-      return res.status(500).json({ error: "Error interno en registro." });
+      return res.status(500).json({
+        error: "Error interno en registro.",
+      });
     }
   });
 
@@ -144,13 +226,17 @@ export default function authRouter(prisma) {
       if (!email || !password) {
         console.timeEnd(`${loginTraceId} VALIDATIONS`);
         console.timeEnd(`${loginTraceId} TOTAL`);
-        return res.status(400).json({ error: "Email y password son obligatorios." });
+        return res.status(400).json({
+          error: "Email y password son obligatorios.",
+        });
       }
 
       if (!secret) {
         console.timeEnd(`${loginTraceId} VALIDATIONS`);
         console.timeEnd(`${loginTraceId} TOTAL`);
-        return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
+        return res.status(500).json({
+          error: "Falta JWT_SECRET en el servidor.",
+        });
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
@@ -173,7 +259,9 @@ export default function authRouter(prisma) {
 
       if (!user) {
         console.timeEnd(`${loginTraceId} TOTAL`);
-        return res.status(401).json({ error: "Credenciales inválidas." });
+        return res.status(401).json({
+          error: "Credenciales inválidas.",
+        });
       }
 
       console.time(`${loginTraceId} BCRYPT_COMPARE`);
@@ -184,13 +272,19 @@ export default function authRouter(prisma) {
 
       if (!ok) {
         console.timeEnd(`${loginTraceId} TOTAL`);
-        return res.status(401).json({ error: "Credenciales inválidas." });
+        return res.status(401).json({
+          error: "Credenciales inválidas.",
+        });
       }
 
       console.time(`${loginTraceId} JWT_SIGN`);
 
       const token = jwt.sign(
-        { sub: user.id, email: user.email, name: user.name || "" },
+        {
+          sub: user.id,
+          email: user.email,
+          name: user.name || "",
+        },
         secret,
         { expiresIn: "7d" }
       );
@@ -215,7 +309,9 @@ export default function authRouter(prisma) {
     } catch (err) {
       console.error("LOGIN_ERROR:", err);
       console.timeEnd(`${loginTraceId} TOTAL`);
-      return res.status(500).json({ error: "Error interno en login." });
+      return res.status(500).json({
+        error: "Error interno en login.",
+      });
     }
   });
 
@@ -224,7 +320,9 @@ export default function authRouter(prisma) {
       const { email } = req.body || {};
 
       if (!email) {
-        return res.status(400).json({ error: "El correo es obligatorio." });
+        return res.status(400).json({
+          error: "El correo es obligatorio.",
+        });
       }
 
       const cleanEmail = String(email).trim().toLowerCase();
@@ -292,7 +390,9 @@ export default function authRouter(prisma) {
       return res.json({ message: genericMessage });
     } catch (err) {
       console.error("FORGOT_PASSWORD_ERROR:", err);
-      return res.status(500).json({ error: "Error interno al solicitar recuperación." });
+      return res.status(500).json({
+        error: "Error interno al solicitar recuperación.",
+      });
     }
   });
 
@@ -301,11 +401,15 @@ export default function authRouter(prisma) {
       const { token, password } = req.body || {};
 
       if (!token || !password) {
-        return res.status(400).json({ error: "Token y nueva contraseña son obligatorios." });
+        return res.status(400).json({
+          error: "Token y nueva contraseña son obligatorios.",
+        });
       }
 
       if (String(password).length < 8) {
-        return res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres." });
+        return res.status(400).json({
+          error: "La contraseña debe tener al menos 8 caracteres.",
+        });
       }
 
       const user = await prisma.user.findFirst({
@@ -321,7 +425,9 @@ export default function authRouter(prisma) {
       });
 
       if (!user) {
-        return res.status(400).json({ error: "El enlace es inválido o ya expiró." });
+        return res.status(400).json({
+          error: "El enlace es inválido o ya expiró.",
+        });
       }
 
       const hash = await bcrypt.hash(String(password), 10);
@@ -335,10 +441,14 @@ export default function authRouter(prisma) {
         },
       });
 
-      return res.json({ message: "Contraseña actualizada correctamente." });
+      return res.json({
+        message: "Contraseña actualizada correctamente.",
+      });
     } catch (err) {
       console.error("RESET_PASSWORD_ERROR:", err);
-      return res.status(500).json({ error: "Error interno al actualizar contraseña." });
+      return res.status(500).json({
+        error: "Error interno al actualizar contraseña.",
+      });
     }
   });
 
@@ -348,13 +458,17 @@ export default function authRouter(prisma) {
       const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
 
       if (!token) {
-        return res.status(401).json({ error: "Sin token." });
+        return res.status(401).json({
+          error: "Sin token.",
+        });
       }
 
       const secret = process.env.JWT_SECRET;
 
       if (!secret) {
-        return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
+        return res.status(500).json({
+          error: "Falta JWT_SECRET en el servidor.",
+        });
       }
 
       const payload = jwt.verify(token, secret);
@@ -367,7 +481,9 @@ export default function authRouter(prisma) {
         },
       });
     } catch (err) {
-      return res.status(401).json({ error: "Token inválido o expirado." });
+      return res.status(401).json({
+        error: "Token inválido o expirado.",
+      });
     }
   });
 
