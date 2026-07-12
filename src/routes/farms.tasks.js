@@ -11,6 +11,8 @@ export function registerTaskRoutes(ctx) {
     toYYYYMMDD,
     normalizeText,
     assertFarmOwner,
+    assertFarmMember,
+    assertFarmAdmin,
   } = ctx;
 
   // GET /api/farms/:id/tasks
@@ -22,7 +24,7 @@ export function registerTaskRoutes(ctx) {
       if (!looksLikeId(farmId))
         return res.status(400).json({ error: "farmId inválido." });
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmMember(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const tasks = await prisma.task.findMany({
@@ -62,7 +64,7 @@ export function registerTaskRoutes(ctx) {
       if (!looksLikeId(farmId))
         return res.status(400).json({ error: "farmId inválido." });
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmAdmin(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const tasks = await prisma.task.findMany({
@@ -390,7 +392,7 @@ export function registerTaskRoutes(ctx) {
       if (!looksLikeId(farmId))
         return res.status(400).json({ error: "farmId inválido." });
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmAdmin(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const { title, zone, type, priority, start, due, status, owner } = req.body || {};
@@ -466,7 +468,7 @@ export function registerTaskRoutes(ctx) {
         return res.status(400).json({ error: "IDs inválidos." });
       }
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmAdmin(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const existing = await prisma.task.findFirst({
@@ -556,7 +558,7 @@ export function registerTaskRoutes(ctx) {
         return res.status(400).json({ error: "IDs inválidos." });
       }
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmAdmin(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const existing = await prisma.task.findFirst({

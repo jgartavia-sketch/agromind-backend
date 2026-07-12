@@ -4,8 +4,12 @@ import express from "express";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
-import jwt from "jsonwebtoken";
 import { fileURLToPath } from "url";
+import { requireAuth } from "./farms.base.js";
+import {
+  assertFarmAdmin,
+  assertZoneMember,
+} from "../services/farmAccess.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,36 +28,6 @@ const componentUploadsDir = path.join(uploadsRoot, "components");
 
 function ensureUploadDirs() {
   fs.mkdirSync(componentUploadsDir, { recursive: true });
-}
-
-function getBearerToken(req) {
-  const auth = req.headers.authorization || "";
-  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
-  return null;
-}
-
-function getRequestUserId(req) {
-  const existingUserId =
-    req.user?.id ||
-    req.userId ||
-    req.auth?.userId ||
-    req.auth?.id ||
-    req.currentUser?.id ||
-    null;
-
-  if (existingUserId) return existingUserId;
-
-  const token = getBearerToken(req);
-  const secret = process.env.JWT_SECRET;
-
-  if (!token || !secret) return null;
-
-  try {
-    const payload = jwt.verify(token, secret);
-    return payload?.sub || payload?.id || payload?.userId || null;
-  } catch {
-    return null;
-  }
 }
 
 function safeUnlink(filePath) {
@@ -153,33 +127,28 @@ export default function componentPhotosRouter(prisma) {
   });
 
   // GET /api/component-photos/:zoneId/:componentId
-  router.get("/:zoneId/:componentId", async (req, res) => {
+  // ADMIN y CONSULTANT pueden ver fotos.
+  router.get("/:zoneId/:componentId", requireAuth, async (req, res) => {
     try {
-      const userId = getRequestUserId(req);
       const { zoneId, componentId } = req.params;
-
-      if (!userId) {
-        return res.status(401).json({ error: "No autenticado." });
-      }
 
       if (!zoneId || !componentId) {
         return res.status(400).json({ error: "Faltan zoneId o componentId." });
       }
 
-      const zone = await prisma.mapZone.findFirst({
-        where: {
-          id: zoneId,
-          farm: { userId },
-        },
+      const access = await assertZoneMember(prisma, zoneId, req.user.id);
+
+      if (!access) {
+        return res.status(404).json({ error: "Zona no encontrada." });
+      }
+
+      const zone = await prisma.mapZone.findUnique({
+        where: { id: zoneId },
         select: {
           id: true,
           components: true,
         },
       });
-
-      if (!zone) {
-        return res.status(404).json({ error: "Zona no encontrada." });
-      }
 
       const component = findComponentInZone(zone, componentId);
       if (!component) {
@@ -191,120 +160,132 @@ export default function componentPhotosRouter(prisma) {
         orderBy: { createdAt: "desc" },
       });
 
-      res.json({ photos });
+      return res.json({ photos });
     } catch (err) {
       console.error("COMPONENT_PHOTOS_LIST_ERROR:", err);
-      res.status(500).json({ error: "No se pudieron cargar las fotos." });
+      return res.status(500).json({ error: "No se pudieron cargar las fotos." });
     }
   });
 
   // POST /api/component-photos/:zoneId/:componentId
-  // Body multipart/form-data: photo=<file>
-  router.post("/:zoneId/:componentId", multerSinglePhoto, async (req, res) => {
-    let uploadedFilePath = req.file?.path || null;
+  // Solo ADMIN puede subir fotos.
+  router.post(
+    "/:zoneId/:componentId",
+    requireAuth,
+    multerSinglePhoto,
+    async (req, res) => {
+      let uploadedFilePath = req.file?.path || null;
 
-    try {
-      const userId = getRequestUserId(req);
-      const { zoneId, componentId } = req.params;
-      const note = String(req.body?.note || "").trim();
+      try {
+        const { zoneId, componentId } = req.params;
+        const note = String(req.body?.note || "").trim();
 
-      if (!userId) {
-        safeUnlink(uploadedFilePath);
-        return res.status(401).json({ error: "No autenticado." });
-      }
+        if (!zoneId || !componentId) {
+          safeUnlink(uploadedFilePath);
+          return res.status(400).json({ error: "Faltan zoneId o componentId." });
+        }
 
-      if (!zoneId || !componentId) {
-        safeUnlink(uploadedFilePath);
-        return res.status(400).json({ error: "Faltan zoneId o componentId." });
-      }
+        if (!req.file) {
+          return res.status(400).json({ error: "Selecciona una imagen." });
+        }
 
-      if (!req.file) {
-        return res.status(400).json({ error: "Selecciona una imagen." });
-      }
+        const access = await assertZoneMember(prisma, zoneId, req.user.id);
 
-      const zone = await prisma.mapZone.findFirst({
-        where: {
-          id: zoneId,
-          farm: { userId },
-        },
-        select: {
-          id: true,
-          farmId: true,
-          components: true,
-        },
-      });
+        if (!access) {
+          safeUnlink(uploadedFilePath);
+          return res.status(404).json({ error: "Zona no encontrada." });
+        }
 
-      if (!zone) {
-        safeUnlink(uploadedFilePath);
-        return res.status(404).json({ error: "Zona no encontrada." });
-      }
+        if (access.role !== "ADMIN") {
+          safeUnlink(uploadedFilePath);
+          return res.status(403).json({
+            error: "Solo un administrador puede subir fotos.",
+          });
+        }
 
-      const component = findComponentInZone(zone, componentId);
-      if (!component) {
-        safeUnlink(uploadedFilePath);
-        return res.status(404).json({ error: "Componente no encontrado en esta zona." });
-      }
-
-      const currentCount = await prisma.componentPhoto.count({
-        where: { zoneId, componentId },
-      });
-
-      if (currentCount >= MAX_PHOTOS_PER_COMPONENT) {
-        safeUnlink(uploadedFilePath);
-        return res.status(409).json({
-          error: `Este componente ya tiene el máximo de ${MAX_PHOTOS_PER_COMPONENT} fotos.`,
+        const zone = await prisma.mapZone.findUnique({
+          where: { id: zoneId },
+          select: {
+            id: true,
+            farmId: true,
+            components: true,
+          },
         });
+
+        const component = findComponentInZone(zone, componentId);
+        if (!component) {
+          safeUnlink(uploadedFilePath);
+          return res.status(404).json({
+            error: "Componente no encontrado en esta zona.",
+          });
+        }
+
+        const currentCount = await prisma.componentPhoto.count({
+          where: { zoneId, componentId },
+        });
+
+        if (currentCount >= MAX_PHOTOS_PER_COMPONENT) {
+          safeUnlink(uploadedFilePath);
+          return res.status(409).json({
+            error: `Este componente ya tiene el máximo de ${MAX_PHOTOS_PER_COMPONENT} fotos.`,
+          });
+        }
+
+        const filename = req.file.filename;
+        const url = getPublicUrl(filename);
+
+        const photo = await prisma.componentPhoto.create({
+          data: {
+            farmId: zone.farmId,
+            zoneId,
+            componentId,
+            filename,
+            url,
+            mimeType: req.file.mimetype,
+            sizeBytes: req.file.size,
+            note: note || null,
+          },
+        });
+
+        uploadedFilePath = null;
+
+        return res.status(201).json({ photo });
+      } catch (err) {
+        safeUnlink(uploadedFilePath);
+        console.error("COMPONENT_PHOTO_UPLOAD_ERROR:", err);
+        return res.status(500).json({ error: "No se pudo guardar la foto." });
       }
-
-      const filename = req.file.filename;
-      const url = getPublicUrl(filename);
-
-      const photo = await prisma.componentPhoto.create({
-        data: {
-          farmId: zone.farmId,
-          zoneId,
-          componentId,
-          filename,
-          url,
-          mimeType: req.file.mimetype,
-          sizeBytes: req.file.size,
-          note: note || null,
-        },
-      });
-
-      uploadedFilePath = null;
-
-      res.status(201).json({ photo });
-    } catch (err) {
-      safeUnlink(uploadedFilePath);
-      console.error("COMPONENT_PHOTO_UPLOAD_ERROR:", err);
-      res.status(500).json({ error: "No se pudo guardar la foto." });
     }
-  });
+  );
 
   // DELETE /api/component-photos/:photoId
-  router.delete("/:photoId", async (req, res) => {
+  // Solo ADMIN puede eliminar fotos.
+  router.delete("/:photoId", requireAuth, async (req, res) => {
     try {
-      const userId = getRequestUserId(req);
       const { photoId } = req.params;
-
-      if (!userId) {
-        return res.status(401).json({ error: "No autenticado." });
-      }
 
       if (!photoId) {
         return res.status(400).json({ error: "Falta photoId." });
       }
 
-      const photo = await prisma.componentPhoto.findFirst({
-        where: {
-          id: photoId,
-          farm: { userId },
-        },
+      const photo = await prisma.componentPhoto.findUnique({
+        where: { id: photoId },
       });
 
       if (!photo) {
         return res.status(404).json({ error: "Foto no encontrada." });
+      }
+
+      const access = await assertFarmAdmin(
+        prisma,
+        photo.farmId,
+        req.user.id
+      );
+
+      if (!access) {
+        return res.status(403).json({
+          error: "Solo un administrador puede eliminar fotos.",
+        });
       }
 
       await prisma.componentPhoto.delete({
@@ -313,10 +294,10 @@ export default function componentPhotosRouter(prisma) {
 
       safeUnlink(getStoredFilePath(photo.filename));
 
-      res.json({ ok: true, deletedId: photo.id });
+      return res.json({ ok: true, deletedId: photo.id });
     } catch (err) {
       console.error("COMPONENT_PHOTO_DELETE_ERROR:", err);
-      res.status(500).json({ error: "No se pudo eliminar la foto." });
+      return res.status(500).json({ error: "No se pudo eliminar la foto." });
     }
   });
 

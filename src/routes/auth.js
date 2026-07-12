@@ -67,6 +67,51 @@ export default function authRouter(prisma) {
           select: { id: true, name: true, createdAt: true, updatedAt: true },
         });
 
+        await tx.farmMember.create({
+          data: {
+            userId: user.id,
+            farmId: farm.id,
+            role: "ADMIN",
+            status: "ACTIVE",
+          },
+        });
+
+        const invitations = await tx.farmInvitation.findMany({
+          where: {
+            email: cleanEmail,
+            status: "PENDING",
+          },
+        });
+
+        for (const invitation of invitations) {
+          await tx.farmMember.upsert({
+            where: {
+              userId_farmId: {
+                userId: user.id,
+                farmId: invitation.farmId,
+              },
+            },
+            update: {
+              role: invitation.role,
+              status: "ACTIVE",
+            },
+            create: {
+              userId: user.id,
+              farmId: invitation.farmId,
+              role: invitation.role,
+              status: "ACTIVE",
+            },
+          });
+
+          await tx.farmInvitation.update({
+            where: { id: invitation.id },
+            data: {
+              status: "ACCEPTED",
+              acceptedAt: new Date(),
+            },
+          });
+        }
+
         return { user, farm };
       });
 

@@ -7,6 +7,7 @@ import { registerZonesReportRoutes } from "./farms.zonesReport.js";
 
 import processesRouter from "./processes.js";
 import componentPhotosRouter from "./componentPhotos.js";
+import farmInvitationsRouter from "./farmInvitations.js";
 
 export default function farmsRouter(prisma) {
   const ctx = createFarmsContext(prisma);
@@ -21,6 +22,9 @@ export default function farmsRouter(prisma) {
 
   // Fotos de componentes
   ctx.router.use("/component-photos", componentPhotosRouter(prisma));
+
+  // Invitaciones y miembros por finca
+  ctx.router.use("/farms", farmInvitationsRouter(prisma));
 
   return ctx.router;
 }

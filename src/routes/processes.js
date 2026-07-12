@@ -1,31 +1,10 @@
+// src/routes/processes.js
 import express from "express";
-import jwt from "jsonwebtoken";
-
-function requireAuth(req, res, next) {
-  try {
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-
-    if (!token) {
-      return res.status(401).json({ error: "Sin token." });
-    }
-
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      return res.status(500).json({ error: "Falta JWT_SECRET en el servidor." });
-    }
-
-    const payload = jwt.verify(token, secret);
-    if (!payload?.sub) {
-      return res.status(401).json({ error: "Token inválido." });
-    }
-
-    req.user = { id: payload.sub };
-    next();
-  } catch {
-    return res.status(401).json({ error: "Token inválido o expirado." });
-  }
-}
+import { requireAuth } from "./farms.base.js";
+import {
+  assertZoneMember,
+  assertProcessMember,
+} from "../services/farmAccess.js";
 
 function isNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
@@ -53,7 +32,11 @@ function parseDateOrNull(value) {
 function normalizeStepCompletion(status, completedAt, fallbackCurrent = null) {
   const finalStatus = cleanStatus(status, "Pendiente");
   const parsedCompletedAt =
-    completedAt === undefined ? fallbackCurrent : completedAt ? parseDateOrNull(completedAt) : null;
+    completedAt === undefined
+      ? fallbackCurrent
+      : completedAt
+      ? parseDateOrNull(completedAt)
+      : null;
 
   if (finalStatus === "Completada") {
     return {
@@ -68,28 +51,41 @@ function normalizeStepCompletion(status, completedAt, fallbackCurrent = null) {
   };
 }
 
+function isAdmin(access) {
+  return access?.role === "ADMIN";
+}
+
+async function getStepAccess(prisma, stepId, userId) {
+  const step = await prisma.zoneProcessStep.findUnique({
+    where: { id: stepId },
+    select: {
+      id: true,
+      processId: true,
+      status: true,
+      completedAt: true,
+    },
+  });
+
+  if (!step) return null;
+
+  const access = await assertProcessMember(prisma, step.processId, userId);
+  if (!access) return null;
+
+  return { step, access };
+}
+
 export default function processesRouter(prisma) {
   const router = express.Router();
 
-  // =========================================================
   // GET /api/processes/zone/:zoneId
-  // Lista procesos de una zona
-  // =========================================================
+  // ADMIN y CONSULTANT pueden ver procesos.
   router.get("/zone/:zoneId", requireAuth, async (req, res) => {
     try {
       const { zoneId } = req.params;
 
-      const zone = await prisma.mapZone.findFirst({
-        where: {
-          id: zoneId,
-          farm: {
-            userId: req.user.id,
-          },
-        },
-        select: { id: true },
-      });
+      const access = await assertZoneMember(prisma, zoneId, req.user.id);
 
-      if (!zone) {
+      if (!access) {
         return res.status(404).json({ error: "Zona no encontrada." });
       }
 
@@ -112,10 +108,8 @@ export default function processesRouter(prisma) {
     }
   });
 
-  // =========================================================
   // POST /api/processes
-  // Crea un proceso
-  // =========================================================
+  // Solo ADMIN puede crear procesos.
   router.post("/", requireAuth, async (req, res) => {
     try {
       const {
@@ -136,23 +130,15 @@ export default function processesRouter(prisma) {
         return res.status(400).json({ error: "zoneId y name son obligatorios." });
       }
 
-      const zone = await prisma.mapZone.findFirst({
-        where: {
-          id: zoneId,
-          farm: {
-            userId: req.user.id,
-          },
-        },
-        select: { id: true },
-      });
+      const access = await assertZoneMember(prisma, zoneId, req.user.id);
 
-      if (!zone) {
+      if (!access) {
         return res.status(404).json({ error: "Zona no encontrada." });
       }
 
-      const parsedStartDate = parseDateOrNull(startDate);
-      const parsedTargetDate = parseDateOrNull(targetDate);
-      const parsedCompletedAt = parseDateOrNull(completedAt);
+      if (!isAdmin(access)) {
+        return res.status(403).json({ error: "Solo un administrador puede crear procesos." });
+      }
 
       const process = await prisma.zoneProcess.create({
         data: {
@@ -164,9 +150,9 @@ export default function processesRouter(prisma) {
           priority: cleanPriority(priority, "Media"),
           owner: cleanString(owner, 120),
           isRecurring: Boolean(isRecurring),
-          startDate: parsedStartDate,
-          targetDate: parsedTargetDate,
-          completedAt: parsedCompletedAt,
+          startDate: parseDateOrNull(startDate),
+          targetDate: parseDateOrNull(targetDate),
+          completedAt: parseDateOrNull(completedAt),
         },
         include: {
           steps: {
@@ -182,10 +168,8 @@ export default function processesRouter(prisma) {
     }
   });
 
-  // =========================================================
   // PUT /api/processes/:id
-  // Actualiza un proceso
-  // =========================================================
+  // Solo ADMIN puede actualizar procesos.
   router.put("/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
@@ -202,20 +186,14 @@ export default function processesRouter(prisma) {
         completedAt,
       } = req.body || {};
 
-      const existing = await prisma.zoneProcess.findFirst({
-        where: {
-          id,
-          zone: {
-            farm: {
-              userId: req.user.id,
-            },
-          },
-        },
-        select: { id: true },
-      });
+      const access = await assertProcessMember(prisma, id, req.user.id);
 
-      if (!existing) {
+      if (!access) {
         return res.status(404).json({ error: "Proceso no encontrado." });
+      }
+
+      if (!isAdmin(access)) {
+        return res.status(403).json({ error: "Solo un administrador puede editar procesos." });
       }
 
       const data = {
@@ -238,9 +216,7 @@ export default function processesRouter(prisma) {
         ...(priority !== undefined
           ? { priority: cleanPriority(priority, "Media") }
           : {}),
-        ...(owner !== undefined
-          ? { owner: cleanString(owner, 120) }
-          : {}),
+        ...(owner !== undefined ? { owner: cleanString(owner, 120) } : {}),
         ...(isRecurring !== undefined
           ? { isRecurring: Boolean(isRecurring) }
           : {}),
@@ -272,28 +248,20 @@ export default function processesRouter(prisma) {
     }
   });
 
-  // =========================================================
   // DELETE /api/processes/:id
-  // Elimina un proceso
-  // =========================================================
+  // Solo ADMIN puede eliminar procesos.
   router.delete("/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
 
-      const existing = await prisma.zoneProcess.findFirst({
-        where: {
-          id,
-          zone: {
-            farm: {
-              userId: req.user.id,
-            },
-          },
-        },
-        select: { id: true },
-      });
+      const access = await assertProcessMember(prisma, id, req.user.id);
 
-      if (!existing) {
+      if (!access) {
         return res.status(404).json({ error: "Proceso no encontrado." });
+      }
+
+      if (!isAdmin(access)) {
+        return res.status(403).json({ error: "Solo un administrador puede eliminar procesos." });
       }
 
       await prisma.zoneProcess.delete({
@@ -307,10 +275,8 @@ export default function processesRouter(prisma) {
     }
   });
 
-  // =========================================================
   // POST /api/processes/step
-  // Crea una etapa de un proceso
-  // =========================================================
+  // Solo ADMIN puede crear etapas.
   router.post("/step", requireAuth, async (req, res) => {
     try {
       const {
@@ -331,32 +297,26 @@ export default function processesRouter(prisma) {
         return res.status(400).json({ error: "processId y name son obligatorios." });
       }
 
-      const process = await prisma.zoneProcess.findFirst({
-        where: {
-          id: processId,
-          zone: {
-            farm: {
-              userId: req.user.id,
-            },
-          },
-        },
-        include: {
-          steps: {
-            select: { stepOrder: true },
-            orderBy: { stepOrder: "desc" },
-            take: 1,
-          },
-        },
-      });
+      const access = await assertProcessMember(prisma, processId, req.user.id);
 
-      if (!process) {
+      if (!access) {
         return res.status(404).json({ error: "Proceso no encontrado." });
       }
+
+      if (!isAdmin(access)) {
+        return res.status(403).json({ error: "Solo un administrador puede crear etapas." });
+      }
+
+      const lastStep = await prisma.zoneProcessStep.findFirst({
+        where: { processId },
+        select: { stepOrder: true },
+        orderBy: { stepOrder: "desc" },
+      });
 
       const nextOrder =
         typeof stepOrder === "number" && Number.isFinite(stepOrder)
           ? stepOrder
-          : (process.steps?.[0]?.stepOrder || 0) + 1;
+          : (lastStep?.stepOrder || 0) + 1;
 
       const normalizedCompletion = normalizeStepCompletion(status, completedAt);
 
@@ -383,10 +343,8 @@ export default function processesRouter(prisma) {
     }
   });
 
-  // =========================================================
   // PUT /api/processes/step/:id
-  // Actualiza una etapa
-  // =========================================================
+  // Solo ADMIN puede actualizar etapas.
   router.put("/step/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
@@ -403,27 +361,17 @@ export default function processesRouter(prisma) {
         completedAt,
       } = req.body || {};
 
-      const existing = await prisma.zoneProcessStep.findFirst({
-        where: {
-          id,
-          process: {
-            zone: {
-              farm: {
-                userId: req.user.id,
-              },
-            },
-          },
-        },
-        select: {
-          id: true,
-          status: true,
-          completedAt: true,
-        },
-      });
+      const result = await getStepAccess(prisma, id, req.user.id);
 
-      if (!existing) {
+      if (!result) {
         return res.status(404).json({ error: "Etapa no encontrada." });
       }
+
+      if (!isAdmin(result.access)) {
+        return res.status(403).json({ error: "Solo un administrador puede editar etapas." });
+      }
+
+      const { step: existing } = result;
 
       const data = {
         ...(name !== undefined
@@ -442,12 +390,8 @@ export default function processesRouter(prisma) {
         ...(priority !== undefined
           ? { priority: cleanPriority(priority, "Media") }
           : {}),
-        ...(owner !== undefined
-          ? { owner: cleanString(owner, 120) }
-          : {}),
-        ...(notes !== undefined
-          ? { notes: cleanString(notes, 1000) }
-          : {}),
+        ...(owner !== undefined ? { owner: cleanString(owner, 120) } : {}),
+        ...(notes !== undefined ? { notes: cleanString(notes, 1000) } : {}),
         ...(startDate !== undefined
           ? { startDate: startDate ? parseDateOrNull(startDate) : null }
           : {}),
@@ -479,30 +423,20 @@ export default function processesRouter(prisma) {
     }
   });
 
-  // =========================================================
   // DELETE /api/processes/step/:id
-  // Elimina una etapa
-  // =========================================================
+  // Solo ADMIN puede eliminar etapas.
   router.delete("/step/:id", requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
 
-      const existing = await prisma.zoneProcessStep.findFirst({
-        where: {
-          id,
-          process: {
-            zone: {
-              farm: {
-                userId: req.user.id,
-              },
-            },
-          },
-        },
-        select: { id: true },
-      });
+      const result = await getStepAccess(prisma, id, req.user.id);
 
-      if (!existing) {
+      if (!result) {
         return res.status(404).json({ error: "Etapa no encontrada." });
+      }
+
+      if (!isAdmin(result.access)) {
+        return res.status(403).json({ error: "Solo un administrador puede eliminar etapas." });
       }
 
       await prisma.zoneProcessStep.delete({

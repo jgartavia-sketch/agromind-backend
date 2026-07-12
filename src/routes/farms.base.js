@@ -1,6 +1,7 @@
 // src/routes/farms.base.js
 import express from "express";
 import jwt from "jsonwebtoken";
+import { assertFarmMember as sharedAssertFarmMember, assertFarmAdmin as sharedAssertFarmAdmin } from "../services/farmAccess.js";
 
 /* =========================
    AUTH
@@ -174,12 +175,17 @@ export function keywordCategory(concept, category) {
 export function createFarmsContext(prisma) {
   const router = express.Router();
 
-  async function assertFarmOwner(farmId, userId) {
-    return prisma.farm.findFirst({
-      where: { id: farmId, userId },
-      select: { id: true, name: true, view: true, preferredCenter: true },
-    });
+  async function assertFarmMember(farmId, userId) {
+    const member = await sharedAssertFarmMember(prisma, farmId, userId);
+    return member?.farm || null;
   }
+
+  async function assertFarmAdmin(farmId, userId) {
+    const member = await sharedAssertFarmAdmin(prisma, farmId, userId);
+    return member?.farm || null;
+  }
+
+  const assertFarmOwner = assertFarmAdmin;
 
   async function assertZoneOwner(zoneId, farmId) {
     return prisma.mapZone.findFirst({
@@ -201,6 +207,8 @@ export function createFarmsContext(prisma) {
 
     requireAuth,
 
+    assertFarmMember,
+    assertFarmAdmin,
     assertFarmOwner,
     assertZoneOwner,
     assertAssetOwner,
@@ -232,6 +240,8 @@ export function registerBaseRoutes(ctx) {
     requireAuth,
     looksLikeId,
     cleanName,
+    assertFarmMember,
+    assertFarmAdmin,
     assertFarmOwner,
     assertZoneOwner,
   } = ctx;
@@ -241,18 +251,35 @@ export function registerBaseRoutes(ctx) {
     try {
       const userId = req.user.id;
 
-      const farms = await prisma.farm.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
+      const memberships = await prisma.farmMember.findMany({
+        where: {
+          userId,
+          status: "ACTIVE",
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
         select: {
-          id: true,
-          name: true,
-          view: true,
-          preferredCenter: true,
-          createdAt: true,
-          updatedAt: true,
+          role: true,
+          farm: {
+            select: {
+              id: true,
+              name: true,
+              view: true,
+              preferredCenter: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          },
         },
       });
+
+      const farms = memberships
+        .filter((membership) => membership.farm)
+        .map((membership) => ({
+          ...membership.farm,
+          role: membership.role,
+        }));
 
       return res.json({ farms });
     } catch (err) {
@@ -273,21 +300,34 @@ export function registerBaseRoutes(ctx) {
       const preferredCenter =
         finalView && Array.isArray(finalView.center) ? finalView.center : null;
 
-      const farm = await prisma.farm.create({
-        data: {
-          userId,
-          name: finalName,
-          ...(finalView ? { view: finalView } : {}),
-          ...(preferredCenter ? { preferredCenter } : {}),
-        },
-        select: {
-          id: true,
-          name: true,
-          view: true,
-          preferredCenter: true,
-          createdAt: true,
-          updatedAt: true,
-        },
+      const farm = await prisma.$transaction(async (tx) => {
+        const createdFarm = await tx.farm.create({
+          data: {
+            userId,
+            name: finalName,
+            ...(finalView ? { view: finalView } : {}),
+            ...(preferredCenter ? { preferredCenter } : {}),
+          },
+          select: {
+            id: true,
+            name: true,
+            view: true,
+            preferredCenter: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        await tx.farmMember.create({
+          data: {
+            userId,
+            farmId: createdFarm.id,
+            role: "ADMIN",
+            status: "ACTIVE",
+          },
+        });
+
+        return createdFarm;
       });
 
       return res.status(201).json({ farm });
@@ -313,7 +353,7 @@ export function registerBaseRoutes(ctx) {
         return res.status(400).json({ error: "farmId inválido." });
       }
 
-      const existingFarm = await assertFarmOwner(farmId, userId);
+      const existingFarm = await assertFarmAdmin(farmId, userId);
       if (!existingFarm) {
         return res.status(403).json({ error: "Sin acceso a esa finca." });
       }
@@ -367,7 +407,7 @@ export function registerBaseRoutes(ctx) {
       if (!looksLikeId(farmId))
         return res.status(400).json({ error: "farmId inválido." });
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmMember(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const [points, lines, zones] = await Promise.all([
@@ -423,7 +463,7 @@ export function registerBaseRoutes(ctx) {
       if (!looksLikeId(farmId))
         return res.status(400).json({ error: "farmId inválido." });
 
-      const farm = await assertFarmOwner(farmId, userId);
+      const farm = await assertFarmAdmin(farmId, userId);
       if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
       const { view, points, lines, zones } = req.body || {};
@@ -595,7 +635,7 @@ export function registerBaseRoutes(ctx) {
           return res.status(400).json({ error: "components es requerido." });
         }
 
-        const farm = await assertFarmOwner(farmId, userId);
+        const farm = await assertFarmAdmin(farmId, userId);
         if (!farm) return res.status(403).json({ error: "Sin acceso a esa finca." });
 
         const zone = await assertZoneOwner(zoneId, farmId);

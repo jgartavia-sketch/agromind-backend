@@ -6,11 +6,28 @@ datasource db {
   provider = "postgresql"
 }
 
+enum FarmRole {
+  ADMIN
+  CONSULTANT
+}
+
+enum FarmMemberStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum FarmInvitationStatus {
+  PENDING
+  ACCEPTED
+  CANCELLED
+  EXPIRED
+}
+
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  password  String
+  id       String  @id @default(cuid())
+  email    String  @unique
+  name     String?
+  password String
 
   resetPasswordToken   String?
   resetPasswordExpires DateTime?
@@ -18,7 +35,9 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  farms Farm[]
+  farms              Farm[]
+  farmMemberships    FarmMember[]
+  invitationsCreated FarmInvitation[] @relation("FarmInvitationCreator")
 }
 
 model Farm {
@@ -33,19 +52,68 @@ model Farm {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  points           MapPoint[]
-  lines            MapLine[]
-  zones            MapZone[]
-  tasks            Task[]
-  movements        FinanceMovement[]
-  assets           Asset[]
-  bitacoraEntries  BitacoraEntry[]
-  componentPhotos  ComponentPhoto[]
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  members         FarmMember[]
+  invitations     FarmInvitation[]
+  points          MapPoint[]
+  lines           MapLine[]
+  zones           MapZone[]
+  tasks           Task[]
+  movements       FinanceMovement[]
+  assets          Asset[]
+  bitacoraEntries BitacoraEntry[]
+  componentPhotos ComponentPhoto[]
 
   @@unique([userId, name])
   @@index([userId])
   @@index([userId, isPrimary])
+}
+
+model FarmMember {
+  id     String @id @default(cuid())
+  userId String
+  farmId String
+
+  role   FarmRole
+  status FarmMemberStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  farm Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, farmId])
+  @@index([userId])
+  @@index([farmId])
+  @@index([farmId, role])
+  @@index([farmId, status])
+}
+
+model FarmInvitation {
+  id          String @id @default(cuid())
+  farmId      String
+  invitedById String
+
+  email  String
+  role   FarmRole             @default(CONSULTANT)
+  status FarmInvitationStatus @default(PENDING)
+
+  token      String    @unique
+  expiresAt  DateTime?
+  acceptedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  farm      Farm @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  invitedBy User @relation("FarmInvitationCreator", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([farmId])
+  @@index([email])
+  @@index([status])
+  @@index([farmId, email])
+  @@index([invitedById])
 }
 
 model MapPoint {
@@ -125,9 +193,9 @@ model ComponentPhoto {
 }
 
 model Task {
-  id       String  @id @default(cuid())
-  farmId   String
-  title    String
+  id     String @id @default(cuid())
+  farmId String
+  title  String
 
   // Legacy: se mantiene para no romper tareas viejas.
   // A partir de esta migración, el frontend debe guardar zoneId/zoneType.
@@ -196,7 +264,7 @@ model Asset {
   purchaseValue Float
   purchaseDate  DateTime @default(now())
 
-  usefulLifeYears Int @default(1)
+  usefulLifeYears Int   @default(1)
   residualValue   Float @default(0)
 
   createdAt DateTime @default(now())
@@ -229,17 +297,17 @@ model BitacoraEntry {
 }
 
 model ZoneProcess {
-  id          String @id @default(cuid())
+  id          String  @id @default(cuid())
   zoneId      String
   name        String
   description String?
-  type        String @default("General")
-  status      String @default("Borrador")
+  type        String  @default("General")
+  status      String  @default("Borrador")
 
   owner    String?
-  priority String @default("Media")
+  priority String  @default("Media")
 
-  isRecurring Boolean @default(false)
+  isRecurring Boolean   @default(false)
   startDate   DateTime?
   targetDate  DateTime?
   completedAt DateTime?
@@ -259,15 +327,15 @@ model ZoneProcess {
 }
 
 model ZoneProcessStep {
-  id          String @id @default(cuid())
+  id          String  @id @default(cuid())
   processId   String
   name        String
   description String?
   stepOrder   Int
-  status      String @default("Pendiente")
+  status      String  @default("Pendiente")
 
   owner    String?
-  priority String @default("Media")
+  priority String  @default("Media")
   notes    String?
 
   startDate   DateTime?
