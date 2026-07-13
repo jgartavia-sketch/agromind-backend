@@ -343,9 +343,10 @@ export default function farmInvitationsRouter(prisma) {
 
       const userIds = [
         ...new Set(
-          memberships
-            .map((membership) => membership.userId)
-            .filter(Boolean)
+          [
+            ...memberships.map((membership) => membership.userId),
+            ...invitations.map((invitation) => invitation.invitedById),
+          ].filter(Boolean)
         ),
       ];
 
@@ -364,17 +365,15 @@ export default function farmInvitationsRouter(prisma) {
         users.map((user) => [String(user.id), user])
       );
 
-      const members = memberships.map((membership) => {
-        const user = usersById.get(String(membership.userId)) || {};
-
+      function buildUserSummary(userId) {
+        const user = usersById.get(String(userId)) || {};
         const fullName = [user.firstName, user.lastName]
           .filter(Boolean)
           .join(" ")
           .trim();
 
         return {
-          id: membership.id,
-          userId: membership.userId,
+          id: user.id || userId || null,
           name:
             user.name ||
             fullName ||
@@ -382,6 +381,17 @@ export default function farmInvitationsRouter(prisma) {
             user.email ||
             "Usuario AgroMind",
           email: user.email || "",
+        };
+      }
+
+      const members = memberships.map((membership) => {
+        const user = buildUserSummary(membership.userId);
+
+        return {
+          id: membership.id,
+          userId: membership.userId,
+          name: user.name,
+          email: user.email,
           role: membership.role,
           status: membership.status,
           joinedAt: membership.createdAt || null,
@@ -396,6 +406,7 @@ export default function farmInvitationsRouter(prisma) {
           role: invitation.role,
           status: invitation.status,
           invitedById: invitation.invitedById,
+          invitedBy: buildUserSummary(invitation.invitedById),
           createdAt: invitation.createdAt || null,
           expiresAt: invitation.expiresAt || null,
         }));
@@ -408,6 +419,7 @@ export default function farmInvitationsRouter(prisma) {
           role: invitation.role,
           status: invitation.status,
           invitedById: invitation.invitedById,
+          invitedBy: buildUserSummary(invitation.invitedById),
           createdAt: invitation.createdAt || null,
           acceptedAt:
             invitation.acceptedAt ||
