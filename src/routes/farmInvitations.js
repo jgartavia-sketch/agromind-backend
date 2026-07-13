@@ -304,6 +304,240 @@ function buildInvitationEmail({ farmName, invitationToken }) {
 export default function farmInvitationsRouter(prisma) {
   const router = express.Router();
 
+
+  // GET /api/farms/:farmId/team
+  router.get("/:farmId/team", requireAuth, async (req, res) => {
+    try {
+      const { farmId } = req.params;
+
+      const access = await assertFarmAdmin(prisma, farmId, req.user.id);
+
+      if (!access) {
+        return res.status(403).json({
+          error: "Solo un administrador puede consultar el equipo.",
+        });
+      }
+
+      const [memberships, invitations] = await Promise.all([
+        prisma.farmMember.findMany({
+          where: {
+            farmId,
+            status: "ACTIVE",
+          },
+          orderBy: {
+            createdAt: "asc",
+          },
+        }),
+        prisma.farmInvitation.findMany({
+          where: {
+            farmId,
+            status: {
+              in: ["PENDING", "ACCEPTED"],
+            },
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        }),
+      ]);
+
+      const userIds = [
+        ...new Set(
+          memberships
+            .map((membership) => membership.userId)
+            .filter(Boolean)
+        ),
+      ];
+
+      const users =
+        userIds.length > 0
+          ? await prisma.user.findMany({
+              where: {
+                id: {
+                  in: userIds,
+                },
+              },
+            })
+          : [];
+
+      const usersById = new Map(
+        users.map((user) => [String(user.id), user])
+      );
+
+      const members = memberships.map((membership) => {
+        const user = usersById.get(String(membership.userId)) || {};
+
+        const fullName = [user.firstName, user.lastName]
+          .filter(Boolean)
+          .join(" ")
+          .trim();
+
+        return {
+          id: membership.id,
+          userId: membership.userId,
+          name:
+            user.name ||
+            fullName ||
+            user.fullName ||
+            user.email ||
+            "Usuario AgroMind",
+          email: user.email || "",
+          role: membership.role,
+          status: membership.status,
+          joinedAt: membership.createdAt || null,
+        };
+      });
+
+      const pendingInvitations = invitations
+        .filter((invitation) => invitation.status === "PENDING")
+        .map((invitation) => ({
+          id: invitation.id,
+          email: invitation.email,
+          role: invitation.role,
+          status: invitation.status,
+          invitedById: invitation.invitedById,
+          createdAt: invitation.createdAt || null,
+          expiresAt: invitation.expiresAt || null,
+        }));
+
+      const acceptedInvitations = invitations
+        .filter((invitation) => invitation.status === "ACCEPTED")
+        .map((invitation) => ({
+          id: invitation.id,
+          email: invitation.email,
+          role: invitation.role,
+          status: invitation.status,
+          invitedById: invitation.invitedById,
+          createdAt: invitation.createdAt || null,
+          acceptedAt:
+            invitation.acceptedAt ||
+            invitation.updatedAt ||
+            null,
+        }));
+
+      return res.json({
+        members,
+        pendingInvitations,
+        acceptedInvitations,
+      });
+    } catch (err) {
+      console.error("GET_FARM_TEAM_ERROR:", err);
+      return res.status(500).json({
+        error: "No se pudo cargar el equipo de la finca.",
+      });
+    }
+  });
+
+  // DELETE /api/farms/:farmId/invitations/:invitationId
+  router.delete(
+    "/:farmId/invitations/:invitationId",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const { farmId, invitationId } = req.params;
+
+        const access = await assertFarmAdmin(prisma, farmId, req.user.id);
+
+        if (!access) {
+          return res.status(403).json({
+            error: "Solo un administrador puede cancelar invitaciones.",
+          });
+        }
+
+        const invitation = await prisma.farmInvitation.findFirst({
+          where: {
+            id: invitationId,
+            farmId,
+            status: "PENDING",
+          },
+        });
+
+        if (!invitation) {
+          return res.status(404).json({
+            error: "La invitación pendiente no fue encontrada.",
+          });
+        }
+
+        await prisma.farmInvitation.delete({
+          where: {
+            id: invitation.id,
+          },
+        });
+
+        return res.json({
+          ok: true,
+          message: "Invitación cancelada correctamente.",
+        });
+      } catch (err) {
+        console.error("DELETE_FARM_INVITATION_ERROR:", err);
+        return res.status(500).json({
+          error: "No se pudo cancelar la invitación.",
+        });
+      }
+    }
+  );
+
+  // DELETE /api/farms/:farmId/members/:memberId
+  router.delete(
+    "/:farmId/members/:memberId",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const { farmId, memberId } = req.params;
+
+        const access = await assertFarmAdmin(prisma, farmId, req.user.id);
+
+        if (!access) {
+          return res.status(403).json({
+            error: "Solo un administrador puede eliminar accesos.",
+          });
+        }
+
+        const membership = await prisma.farmMember.findFirst({
+          where: {
+            id: memberId,
+            farmId,
+            status: "ACTIVE",
+          },
+        });
+
+        if (!membership) {
+          return res.status(404).json({
+            error: "El miembro activo no fue encontrado.",
+          });
+        }
+
+        if (membership.userId === req.user.id) {
+          return res.status(400).json({
+            error: "No puedes eliminar tu propio acceso administrativo.",
+          });
+        }
+
+        if (membership.role === "ADMIN") {
+          return res.status(400).json({
+            error: "No puedes eliminar a otro administrador desde esta acción.",
+          });
+        }
+
+        await prisma.farmMember.delete({
+          where: {
+            id: membership.id,
+          },
+        });
+
+        return res.json({
+          ok: true,
+          message: "Acceso eliminado correctamente.",
+        });
+      } catch (err) {
+        console.error("DELETE_FARM_MEMBER_ERROR:", err);
+        return res.status(500).json({
+          error: "No se pudo eliminar el acceso.",
+        });
+      }
+    }
+  );
+
   // POST /api/farms/:farmId/invitations
   router.post("/:farmId/invitations", requireAuth, async (req, res) => {
     try {
