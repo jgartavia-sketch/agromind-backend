@@ -315,6 +315,179 @@ export default function authRouter(prisma) {
     }
   });
 
+
+  router.post("/login-with-invitation", async (req, res) => {
+    try {
+      const { email, password, invitationToken } = req.body || {};
+      const secret = process.env.JWT_SECRET;
+
+      if (!email || !password || !invitationToken) {
+        return res.status(400).json({
+          error: "Email, password e invitationToken son obligatorios.",
+        });
+      }
+
+      if (!secret) {
+        return res.status(500).json({
+          error: "Falta JWT_SECRET en el servidor.",
+        });
+      }
+
+      const cleanEmail = String(email).trim().toLowerCase();
+      const cleanInvitationToken = String(invitationToken).trim();
+
+      const user = await prisma.user.findUnique({
+        where: { email: cleanEmail },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          password: true,
+        },
+      });
+
+      if (!user) {
+        return res.status(401).json({
+          error: "Credenciales inválidas.",
+        });
+      }
+
+      const passwordOk = await bcrypt.compare(
+        String(password),
+        user.password
+      );
+
+      if (!passwordOk) {
+        return res.status(401).json({
+          error: "Credenciales inválidas.",
+        });
+      }
+
+      const invitation = await prisma.farmInvitation.findFirst({
+        where: {
+          token: cleanInvitationToken,
+          status: "PENDING",
+        },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          farmId: true,
+          expiresAt: true,
+          farm: {
+            select: {
+              id: true,
+              name: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          },
+        },
+      });
+
+      if (!invitation) {
+        return res.status(400).json({
+          error: "La invitación es inválida o ya fue utilizada.",
+        });
+      }
+
+      if (
+        invitation.expiresAt &&
+        new Date(invitation.expiresAt).getTime() <= Date.now()
+      ) {
+        await prisma.farmInvitation.update({
+          where: { id: invitation.id },
+          data: {
+            status: "EXPIRED",
+          },
+        });
+
+        return res.status(400).json({
+          error: "La invitación ya expiró.",
+        });
+      }
+
+      if (
+        String(invitation.email).trim().toLowerCase() !== cleanEmail
+      ) {
+        return res.status(403).json({
+          error:
+            "Debes iniciar sesión con el mismo correo al que se envió la invitación.",
+        });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const membership = await tx.farmMember.upsert({
+          where: {
+            userId_farmId: {
+              userId: user.id,
+              farmId: invitation.farmId,
+            },
+          },
+          update: {
+            role: invitation.role,
+            status: "ACTIVE",
+          },
+          create: {
+            userId: user.id,
+            farmId: invitation.farmId,
+            role: invitation.role,
+            status: "ACTIVE",
+          },
+          select: {
+            id: true,
+            userId: true,
+            farmId: true,
+            role: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        await tx.farmInvitation.update({
+          where: { id: invitation.id },
+          data: {
+            status: "ACCEPTED",
+            acceptedAt: new Date(),
+          },
+        });
+
+        return {
+          membership,
+          farm: invitation.farm,
+        };
+      });
+
+      const token = jwt.sign(
+        {
+          sub: user.id,
+          email: user.email,
+          name: user.name || "",
+        },
+        secret,
+        { expiresIn: "7d" }
+      );
+
+      return res.json({
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+        },
+        farm: result.farm,
+        membership: result.membership,
+        registrationMode: "invitation_existing_user",
+      });
+    } catch (err) {
+      console.error("LOGIN_WITH_INVITATION_ERROR:", err);
+      return res.status(500).json({
+        error: "Error interno aceptando la invitación.",
+      });
+    }
+  });
+
   router.post("/forgot-password", async (req, res) => {
     try {
       const { email } = req.body || {};
