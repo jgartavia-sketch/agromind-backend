@@ -550,6 +550,57 @@ export default function farmInvitationsRouter(prisma) {
     }
   );
 
+  // DELETE /api/farms/:farmId/leave
+  router.delete("/:farmId/leave", requireAuth, async (req, res) => {
+    try {
+      const { farmId } = req.params;
+
+      const membership = await prisma.farmMember.findUnique({
+        where: {
+          userId_farmId: {
+            userId: req.user.id,
+            farmId,
+          },
+        },
+      });
+
+      if (!membership || membership.status !== "ACTIVE") {
+        return res.status(404).json({
+          error: "No tienes un acceso activo a esta finca.",
+        });
+      }
+
+      if (membership.role === "ADMIN") {
+        return res.status(400).json({
+          error: "No puedes abandonar una finca que administras.",
+        });
+      }
+
+      if (membership.role !== "CONSULTANT") {
+        return res.status(403).json({
+          error: "Tu rol no permite abandonar la finca desde esta acción.",
+        });
+      }
+
+      await prisma.farmMember.delete({
+        where: {
+          id: membership.id,
+        },
+      });
+
+      return res.json({
+        ok: true,
+        farmId,
+        message: "Has salido de la finca correctamente.",
+      });
+    } catch (err) {
+      console.error("LEAVE_FARM_ERROR:", err);
+      return res.status(500).json({
+        error: "No se pudo abandonar la finca.",
+      });
+    }
+  });
+
   // POST /api/farms/:farmId/invitations
   router.post("/:farmId/invitations", requireAuth, async (req, res) => {
     try {
