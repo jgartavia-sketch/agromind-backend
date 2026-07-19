@@ -304,6 +304,135 @@ function buildInvitationEmail({ farmName, invitationToken }) {
 export default function farmInvitationsRouter(prisma) {
   const router = express.Router();
 
+  // POST /api/farms/invitations/accept
+  // Acepta directamente una invitación cuando el usuario ya tiene sesión.
+  router.post("/invitations/accept", requireAuth, async (req, res) => {
+    try {
+      const invitationToken = String(req.body?.invitationToken || "").trim();
+
+      if (!invitationToken) {
+        return res.status(400).json({
+          error: "El token de invitación es obligatorio.",
+        });
+      }
+
+      const invitation = await prisma.farmInvitation.findFirst({
+        where: {
+          token: invitationToken,
+          status: "PENDING",
+        },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          farmId: true,
+          expiresAt: true,
+          farm: {
+            select: {
+              id: true,
+              name: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          },
+        },
+      });
+
+      if (!invitation) {
+        return res.status(400).json({
+          error: "La invitación es inválida o ya fue utilizada.",
+        });
+      }
+
+      if (
+        invitation.expiresAt &&
+        new Date(invitation.expiresAt).getTime() <= Date.now()
+      ) {
+        await prisma.farmInvitation.update({
+          where: { id: invitation.id },
+          data: { status: "EXPIRED" },
+        });
+
+        return res.status(400).json({
+          error: "La invitación ya expiró.",
+        });
+      }
+
+      const authenticatedUser = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { id: true, email: true, name: true },
+      });
+
+      if (!authenticatedUser) {
+        return res.status(401).json({
+          error: "La sesión del usuario ya no es válida.",
+        });
+      }
+
+      if (
+        normalizeEmail(authenticatedUser.email) !==
+        normalizeEmail(invitation.email)
+      ) {
+        return res.status(403).json({
+          error:
+            "Debes aceptar la invitación con el mismo correo que la recibió.",
+        });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const membership = await tx.farmMember.upsert({
+          where: {
+            userId_farmId: {
+              userId: authenticatedUser.id,
+              farmId: invitation.farmId,
+            },
+          },
+          update: {
+            role: invitation.role,
+            status: "ACTIVE",
+          },
+          create: {
+            userId: authenticatedUser.id,
+            farmId: invitation.farmId,
+            role: invitation.role,
+            status: "ACTIVE",
+          },
+          select: {
+            id: true,
+            userId: true,
+            farmId: true,
+            role: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        await tx.farmInvitation.update({
+          where: { id: invitation.id },
+          data: {
+            status: "ACCEPTED",
+            acceptedAt: new Date(),
+          },
+        });
+
+        return { membership };
+      });
+
+      return res.json({
+        ok: true,
+        message: "Invitación aceptada correctamente.",
+        farm: invitation.farm,
+        membership: result.membership,
+      });
+    } catch (err) {
+      console.error("ACCEPT_FARM_INVITATION_ERROR:", err);
+      return res.status(500).json({
+        error: "No se pudo aceptar la invitación.",
+      });
+    }
+  });
+
 
   // GET /api/farms/:farmId/team
   router.get("/:farmId/team", requireAuth, async (req, res) => {
